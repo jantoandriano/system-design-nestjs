@@ -1,0 +1,129 @@
+version: "3.9"
+
+services:
+  # ---------------------------------------------------------------------
+  # MAIN DATABASE (write path)
+  # ---------------------------------------------------------------------
+  postgres-primary:
+    image: bitnami/postgresql:16
+    container_name: postgres-primary
+    environment:
+      POSTGRESQL_REPLICATION_MODE: master
+      POSTGRESQL_REPLICATION_USER: ${POSTGRES_REPLICATION_USER}
+      POSTGRESQL_REPLICATION_PASSWORD: ${POSTGRES_REPLICATION_PASSWORD}
+      POSTGRESQL_USERNAME: ${POSTGRES_USER}
+      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRESQL_DATABASE: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_primary_data:/bitnami/postgresql
+    networks:
+      - system-design-net
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------
+  # DUPLICATE DATABASE (read replica, streams from primary)
+  # ---------------------------------------------------------------------
+  postgres-replica:
+    image: bitnami/postgresql:16
+    container_name: postgres-replica
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    environment:
+      POSTGRESQL_REPLICATION_MODE: slave
+      POSTGRESQL_REPLICATION_USER: ${POSTGRES_REPLICATION_USER}
+      POSTGRESQL_REPLICATION_PASSWORD: ${POSTGRES_REPLICATION_PASSWORD}
+      POSTGRESQL_MASTER_HOST: postgres-primary
+      POSTGRESQL_MASTER_PORT_NUMBER: 5432
+      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_replica_data:/bitnami/postgresql
+    networks:
+      - system-design-net
+
+  # ---------------------------------------------------------------------
+  # MESSAGE QUEUE
+  # ---------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "5672:5672"     # AMQP protocol
+      - "15672:15672"   # management UI (login with RABBITMQ_USER/PASSWORD)
+    networks:
+      - system-design-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------
+  # APP INSTANCES (identical, horizontally scaled behind nginx)
+  # ---------------------------------------------------------------------
+  app1:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: app1
+    env_file: .env
+    environment:
+      INSTANCE_NAME: app1
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - system-design-net
+
+  app2:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: app2
+    env_file: .env
+    environment:
+      INSTANCE_NAME: app2
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - system-design-net
+
+  # ---------------------------------------------------------------------
+  # LOAD BALANCER (single entrypoint for clients)
+  # ---------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: load-balancer
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app1
+      - app2
+    networks:
+      - system-design-net
+
+networks:
+  system-design-net:
+    driver: bridge
+
+volumes:
+  postgres_primary_data:
+  postgres_replica_data:
