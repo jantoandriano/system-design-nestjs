@@ -50,6 +50,55 @@ services:
       - system-design-net
 
   # ---------------------------------------------------------------------
+  # CONNECTION POOLING
+  # Each app instance opening its own pool directly against Postgres
+  # doesn't scale past a handful of instances - Postgres has a hard
+  # max_connections ceiling (100 by default). PgBouncer sits in front of
+  # each database and multiplexes many app-side connections onto a small
+  # number of real Postgres connections.
+  # ---------------------------------------------------------------------
+  pgbouncer-primary:
+    image: bitnami/pgbouncer:1
+    container_name: pgbouncer-primary
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    environment:
+      POSTGRESQL_HOST: postgres-primary
+      POSTGRESQL_PORT: 5432
+      POSTGRESQL_USERNAME: ${POSTGRES_USER}
+      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRESQL_DATABASE: ${POSTGRES_DB}
+      PGBOUNCER_DATABASE: ${POSTGRES_DB}
+      PGBOUNCER_POOL_MODE: transaction
+      PGBOUNCER_MAX_CLIENT_CONN: 1000
+      PGBOUNCER_DEFAULT_POOL_SIZE: 20
+    ports:
+      - "6432:6432"
+    networks:
+      - system-design-net
+
+  pgbouncer-replica:
+    image: bitnami/pgbouncer:1
+    container_name: pgbouncer-replica
+    depends_on:
+      - postgres-replica
+    environment:
+      POSTGRESQL_HOST: postgres-replica
+      POSTGRESQL_PORT: 5432
+      POSTGRESQL_USERNAME: ${POSTGRES_USER}
+      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRESQL_DATABASE: ${POSTGRES_DB}
+      PGBOUNCER_DATABASE: ${POSTGRES_DB}
+      PGBOUNCER_POOL_MODE: transaction
+      PGBOUNCER_MAX_CLIENT_CONN: 1000
+      PGBOUNCER_DEFAULT_POOL_SIZE: 20
+    ports:
+      - "6433:6432"
+    networks:
+      - system-design-net
+
+  # ---------------------------------------------------------------------
   # MESSAGE QUEUE
   # ---------------------------------------------------------------------
   rabbitmq:
@@ -70,6 +119,27 @@ services:
       retries: 5
 
   # ---------------------------------------------------------------------
+  # MIGRATIONS
+  # Runs once, applies pending migrations directly against the primary
+  # (bypassing PgBouncer - DDL behaves more predictably outside a
+  # transaction-mode pooler), then exits. app1/app2 wait for this to
+  # finish successfully before they start, so nobody boots against a
+  # schema mid-migration.
+  # ---------------------------------------------------------------------
+  migrate:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: migrate
+    env_file: .env
+    entrypoint: ["node", "node_modules/.bin/typeorm", "migration:run", "-d", "dist/database/data-source.js"]
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    networks:
+      - system-design-net
+
+  # ---------------------------------------------------------------------
   # APP INSTANCES (identical, horizontally scaled behind nginx)
   # ---------------------------------------------------------------------
   app1:
@@ -81,8 +151,12 @@ services:
     environment:
       INSTANCE_NAME: app1
     depends_on:
-      postgres-primary:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer-primary:
+        condition: service_started
+      pgbouncer-replica:
+        condition: service_started
       rabbitmq:
         condition: service_healthy
     networks:
@@ -97,8 +171,12 @@ services:
     environment:
       INSTANCE_NAME: app2
     depends_on:
-      postgres-primary:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer-primary:
+        condition: service_started
+      pgbouncer-replica:
+        condition: service_started
       rabbitmq:
         condition: service_healthy
     networks:
@@ -112,11 +190,43 @@ services:
     container_name: load-balancer
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
     depends_on:
       - app1
       - app2
+    networks:
+      - system-design-net
+
+  # ---------------------------------------------------------------------
+  # OBSERVABILITY
+  # ---------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - system-design-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    environment:
+      # Placeholder - change on first login, or set via env for automated setups.
+      GF_SECURITY_ADMIN_PASSWORD: changeme_grafana_password
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3003:3000"
+    depends_on:
+      - prometheus
     networks:
       - system-design-net
 
@@ -127,3 +237,5 @@ networks:
 volumes:
   postgres_primary_data:
   postgres_replica_data:
+  prometheus_data:
+  grafana_data:
