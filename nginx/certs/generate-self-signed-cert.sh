@@ -12,6 +12,6 @@ cd "$(dirname "$0")"
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -keyout privkey.pem \
   -out fullchain.pem \
-  -subj "/CN=localhost"
+  -subj "//CN=localhost"
 
 echo "Generated nginx/certs/fullchain.pem and nginx/certs/privkey.pem"

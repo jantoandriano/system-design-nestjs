@@ -5,7 +5,7 @@ services:
   # MAIN DATABASE (write path)
   # ---------------------------------------------------------------------
   postgres-primary:
-    image: bitnami/postgresql:16
+    image: bitnamilegacy/postgresql:16
     container_name: postgres-primary
     environment:
       POSTGRESQL_REPLICATION_MODE: master
@@ -30,7 +30,7 @@ services:
   # DUPLICATE DATABASE (read replica, streams from primary)
   # ---------------------------------------------------------------------
   postgres-replica:
-    image: bitnami/postgresql:16
+    image: bitnamilegacy/postgresql:16
     container_name: postgres-replica
     depends_on:
       postgres-primary:
@@ -58,7 +58,7 @@ services:
   # number of real Postgres connections.
   # ---------------------------------------------------------------------
   pgbouncer-primary:
-    image: bitnami/pgbouncer:1
+    image: bitnamilegacy/pgbouncer:1
     container_name: pgbouncer-primary
     depends_on:
       postgres-primary:
@@ -79,7 +79,7 @@ services:
       - system-design-net
 
   pgbouncer-replica:
-    image: bitnami/pgbouncer:1
+    image: bitnamilegacy/pgbouncer:1
     container_name: pgbouncer-replica
     depends_on:
       - postgres-replica

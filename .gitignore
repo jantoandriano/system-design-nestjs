@@ -10,6 +10,9 @@ client/next-env.d.ts
 # Env
 .env
 
+# Self-signed TLS certs (generated locally by nginx/certs/generate-self-signed-cert.sh)
+nginx/certs/*.pem
+
 # Local MCP server config (see .mcp.json's own header comment - no
 # secrets/machine paths in it, but it's documented as gitignored)
 .mcp.json
