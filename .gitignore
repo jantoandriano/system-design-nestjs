@@ -19,6 +19,7 @@ nginx/certs/*.pem
 
 # Logs
 npm-debug.log*
+*.stackdump
 
 # OS
 .DS_Store
