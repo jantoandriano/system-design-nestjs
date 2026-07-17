@@ -160,7 +160,14 @@ services:
       rabbitmq:
         condition: service_healthy
     networks:
-      - system-design-net
+      system-design-net:
+        # Shared alias so the Next.js client's server-side calls (see
+        # `client` service) round-robin across app1/app2 via Docker's
+        # embedded DNS, the same way nginx's upstream does for external
+        # traffic - without the client needing to trust nginx's
+        # self-signed cert for internal calls.
+        aliases:
+          - nestjs-backend
 
   app2:
     build:
@@ -180,6 +187,27 @@ services:
       rabbitmq:
         condition: service_healthy
     networks:
+      system-design-net:
+        aliases:
+          - nestjs-backend
+
+  # ---------------------------------------------------------------------
+  # FRONTEND (Next.js) - BFF that bridges the raw JWT from POST
+  # /auth/login into an httpOnly cookie (see client/lib/session.ts).
+  # Talks to the backend directly over the internal network
+  # (INTERNAL_API_URL), never through nginx. Not published on a host
+  # port - nginx is the only public entrypoint, same as app1/app2.
+  # ---------------------------------------------------------------------
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: client
+    env_file: .env
+    depends_on:
+      - app1
+      - app2
+    networks:
       - system-design-net
 
   # ---------------------------------------------------------------------
@@ -197,6 +225,7 @@ services:
     depends_on:
       - app1
       - app2
+      - client
     networks:
       - system-design-net
 

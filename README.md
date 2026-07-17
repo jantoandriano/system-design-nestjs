@@ -16,16 +16,20 @@ for you — see "Where this still needs a real platform" below.
 ## Architecture
 
 ```
-Client
+Browser
   │
   ▼
 nginx (TLS termination, rate limiting, load balancer :443)
   │
-  ├──► app1 (NestJS) ─┐
-  └──► app2 (NestJS) ─┤
-                       ├──► pgbouncer-primary ──► postgres-primary  (writes)
-                       ├──► pgbouncer-replica ──► postgres-replica  (reads)
-                       └──► rabbitmq (quorum queue + DLQ)
+  ├──► /            client (Next.js)
+  │                    │
+  │                    └──► app1/app2 (internal, server-side calls only)
+  │
+  └──► /api/*       app1 (NestJS) ─┐
+       /health      app2 (NestJS) ─┤
+       /metrics                     ├──► pgbouncer-primary ──► postgres-primary  (writes)
+                                     ├──► pgbouncer-replica ──► postgres-replica  (reads)
+                                     └──► rabbitmq (quorum queue + DLQ)
 
 prometheus ──scrapes──► app1 /metrics, app2 /metrics
 grafana ──queries──► prometheus
@@ -66,25 +70,33 @@ separate step needed.
 
 Then, against `https://localhost` (accept the self-signed cert warning):
 
+The Nest API sits behind nginx's `/api/` prefix (stripped before it
+reaches the app - see `nginx/nginx.conf`); `/health` and `/metrics` stay
+unprefixed since Prometheus scrapes those paths directly against
+`app1`/`app2`, not through nginx.
+
 ```bash
 # Log in (demo credential - see "Auth" below)
-TOKEN=$(curl -sk -X POST https://localhost/auth/login \
+TOKEN=$(curl -sk -X POST https://localhost/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"<the password you hashed into AUTH_PASSWORD_HASH>"}' \
   | jq -r .accessToken)
 
 # Writes require the token
-curl -sk -X POST https://localhost/tasks \
+curl -sk -X POST https://localhost/api/tasks \
   -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
   -d '{"title":"write more system design notes"}'
 
 # Reads don't
-curl -sk https://localhost/tasks
+curl -sk https://localhost/api/tasks
 
 # Health, metrics
 curl -sk https://localhost/health
 curl -sk https://localhost/metrics
 ```
+
+Or use the web client directly at `https://localhost` - login form at
+`/login`, task list + create form at `/tasks` (see "Web client" below).
 
 Other UIs:
 - RabbitMQ management: `http://localhost:15672` (`RABBITMQ_USER`/`RABBITMQ_PASSWORD` from `.env`) - check the `tasks_queue.dlq` queue to see dead-lettered messages after repeated failures.
@@ -105,6 +117,15 @@ node -e "require('bcryptjs').hash('your-password', 10).then(console.log)"
 Before this handles real accounts: replace `AuthService.login` with a
 lookup against a users table (per-user bcrypt hashes), and consider
 refresh tokens if 1-hour access tokens are too short for your use case.
+
+## Web client
+
+`client/` is a Next.js app (App Router), served same-origin at `/`
+behind the same nginx entrypoint - no CORS needed. It never handles the
+raw JWT client-side: Server Actions call the Nest API server-side
+(directly over the internal docker network, bypassing nginx) and store
+the resulting token in an httpOnly cookie. See
+`client/lib/session.ts` and `client/app/{login,tasks}/actions.ts`.
 
 ## Migrations
 
@@ -159,6 +180,15 @@ app/
     tasks/                        # CRUD example wired through primary/replica/queue/auth
     health/                       # GET /health
     metrics/                      # GET /metrics (Prometheus format)
+  Dockerfile                      # multi-stage, non-root
+client/
+  app/
+    login/                         # login form + Server Action
+    tasks/                         # task list + create form + Server Action
+    logout/                        # Server Action
+  lib/
+    api.ts                          # server-only fetch helpers against INTERNAL_API_URL
+    session.ts                       # httpOnly session cookie helpers
   Dockerfile                      # multi-stage, non-root
 .github/workflows/ci-cd.yml       # lint/test/build -> audit -> image -> deploy
 ```

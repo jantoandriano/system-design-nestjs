@@ -1,0 +1,25 @@
+{
+  "$comment": "Template for .mcp.json (the real .mcp.json is gitignored). Copy it to .mcp.json — it works as-is, no secrets or machine paths. Server name = MCP tool prefix (e.g. 'codegraph' -> mcp__codegraph__*). Requires `codegraph` and `serena` on PATH (installed under ~/.local/bin); both follow the client's working directory, so the same entry serves the canonical checkout and any worktree. Build the indexes once with scripts/code-intel-init.sh.",
+  "mcpServers": {
+    "codegraph": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "export PATH=\"$PATH:$HOME/.local/bin\"; exec codegraph serve --mcp"
+      ]
+    },
+    "serena": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "export PATH=\"$PATH:$HOME/.local/bin\"; exec serena start-mcp-server --context ide-assistant"
+      ]
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"]
+    }
+  }
+}
+
+
