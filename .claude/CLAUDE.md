@@ -25,7 +25,9 @@ Client commands run from `client/`:
 ```bash
 npm run dev        # next dev
 npm run build       # next build
-npm run lint          # next lint
+npm run lint          # next lint (no eslint config committed yet — prompts interactively until one's added)
+npm test              # vitest run
+npm run test:watch     # vitest
 ```
 
 Migrations (TypeORM, CLI-only connection defined in `src/database/data-source.ts`):
@@ -78,6 +80,20 @@ prometheus scrapes app1/app2 /metrics directly (not through nginx); grafana quer
 
 **Graceful shutdown matters here**: `app.enableShutdownHooks()` in `main.ts` lets `onModuleDestroy`/`beforeApplicationShutdown` run on SIGTERM (what Docker/K8s send before killing a container) — e.g. `QueueConsumerService.onModuleDestroy` closes the AMQP connection cleanly instead of dropping in-flight acks.
 
+## Frontend (client/)
+
+The conventions below are also written up as a skill at `.claude/skills/SKILL.md` (+ `.claude/skills/skill-*.md` references) — read those for copy-adaptable patterns; this section says what's actually true of this codebase today.
+
+**`app/` is routing only; feature code lives in `src/features/<name>/`.** Route segment files (`page.tsx`, `layout.tsx`) stay thin and import from the matching feature — e.g. `app/tasks/page.tsx` is a Server Component that calls `fetchTasks()` and `getSessionToken()` directly, then renders `<TaskList>`/`<CreateTaskForm>` from `src/features/tasks/components/`. `app/providers.tsx` (the `QueryClientProvider` wrapper) is the one exception that stays in `app/` per Next.js convention. `@/*` resolves to `src/*` (`tsconfig.json`), so shared code goes in `src/lib/` (`utils.ts` for `cn()`, `session.ts` for the httpOnly cookie helpers) and `src/components/ui/` (shadcn-generated).
+
+**Each feature owns `schemas.ts` (Zod), `api.ts` (fetch wrappers + error classes), `actions.ts` (Server Actions), and for `tasks` also `query-keys.ts` + `hooks/`.** Types are inferred from Zod schemas, not hand-written — `taskSchema`/`Task` in `src/features/tasks/schemas.ts` is the pattern to copy for a new feature. Error classes (`UnauthorizedError`, `InvalidCredentialsError`) live next to the `api.ts` that throws them and stay feature-local unless a second feature needs them.
+
+**Two different mutation patterns, picked per form's needs, not uniformly:** `LoginForm` is a plain `<form action={loginAction}>` + `useActionState` — no client cache to update, so no TanStack Query involved. `CreateTaskForm` goes through `useCreateTask()` (`useMutation` wrapping the `createTaskAction` Server Action as `mutationFn`), because it needs to invalidate the `tasks` query on success. `TaskList` reads via `useTasks(initialTasks)`, a `useQuery` seeded with the Server Component's fetch as `initialData` (no hydration boundary needed for a single query — see `references/nextjs-app-router.md` in the skill for when Pattern B, prefetch+hydrate, would be worth the extra ceremony instead).
+
+**shadcn/ui here is the Base UI flavor, not Radix** (`components.json` → `"style": "base-nova"`, primitives import from `@base-ui/react/*`). `src/components/ui/button.tsx` and `input.tsx` use Base UI primitives; `label.tsx` and the hand-written `form.tsx` are plain elements + `@radix-ui/react-slot` (a standalone primitive, not part of Radix's component set) — don't assume a `@radix-ui/react-*` component package is available when extending `components/ui/`, check what's actually installed first. `npx shadcn@latest add <name>` may return an empty registry item for some components in this style (happened for `form`) — if so, hand-write from the canonical shadcn source rather than assuming the component doesn't exist.
+
+**Tests are colocated** (`Component.tsx` + `Component.test.tsx` in the same folder), run via Vitest + React Testing Library (`vitest.config.ts`, `vitest.setup.ts`). Mock at the `api.ts`/`actions.ts` boundary (`vi.mock('../actions')`), not TanStack Query internals; wrap components that use query hooks with `renderWithQueryClient` from `src/test/utils.tsx`.
+
 ## Project layout
 
 ```
@@ -88,16 +104,14 @@ app/src/
   tasks/        CRUD example wired through primary/replica/queue/auth — the reference implementation to follow for new resources
   health/       GET /health
   metrics/      GET /metrics (Prometheus format)
+client/
+  app/                             routes only (page/layout/providers), thin
+  src/
+    features/{auth,tasks}/         schemas.ts, api.ts, actions.ts, (tasks only) query-keys.ts, hooks/, components/
+    components/ui/                 shadcn-generated (Base UI flavor, see Frontend section)
+    lib/                           cn(), session cookie helpers
+    test/                          shared test utils (renderWithQueryClient)
 nginx/nginx.conf                  TLS + rate limiting + load balancing + /api split
 grafana/provisioning/             datasource + dashboard, auto-loaded
 .github/workflows/ci-cd.yml       lint/test/build -> npm audit -> image build+push -> deploy
-
-client/
-  app/
-    login/        login form + Server Action (loginAction)
-    tasks/        task list (Server Component) + create form + Server Action (createTaskAction)
-    logout/       Server Action (logoutAction)
-  lib/
-    api.ts          server-only fetch helpers against INTERNAL_API_URL — never import from a client component
-    session.ts       httpOnly session cookie helpers (get/set/clear)
 ```

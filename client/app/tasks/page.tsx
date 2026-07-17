@@ -1,10 +1,11 @@
-import { getTasks } from '@/lib/api';
+import { fetchTasks } from '@/features/tasks/api';
+import { CreateTaskForm } from '@/features/tasks/components/CreateTaskForm';
+import { TaskList } from '@/features/tasks/components/TaskList';
+import { logoutAction } from '@/features/auth/actions';
 import { getSessionToken } from '@/lib/session';
-import { logoutAction } from '../logout/actions';
-import CreateTaskForm from './create-task-form';
 
 export default async function TasksPage() {
-  const [tasks, token] = await Promise.all([getTasks(), getSessionToken()]);
+  const [tasks, token] = await Promise.all([fetchTasks(), getSessionToken()]);
 
   return (
     <>
@@ -27,21 +28,7 @@ export default async function TasksPage() {
         </p>
       )}
 
-      {tasks.length === 0 ? (
-        <p className="empty">No tasks yet.</p>
-      ) : (
-        <ul className="task-list">
-          {tasks.map((task) => (
-            <li key={task.id} className="task-item">
-              {task.title}
-              <div className="meta">
-                {task.completed ? 'completed' : 'open'} ·{' '}
-                {new Date(task.createdAt).toLocaleString()}
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
+      <TaskList initialTasks={tasks} />
     </>
   );
 }

@@ -5,7 +5,9 @@ node_modules/
 app/dist/
 app/coverage/
 client/.next/
+client/coverage/
 client/next-env.d.ts
+*.tsbuildinfo
 
 # Env
 .env
