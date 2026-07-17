@@ -3,11 +3,16 @@ node_modules/
 
 # Build output
 app/dist/
+app/coverage/
 client/.next/
 client/next-env.d.ts
 
 # Env
 .env
+
+# Local MCP server config (see .mcp.json's own header comment - no
+# secrets/machine paths in it, but it's documented as gitignored)
+.mcp.json
 
 # Logs
 npm-debug.log*
