@@ -1,4 +1,4 @@
-# ERP Phase 6: Extraction-Readiness Audit — Implementation Plan
+# ERP Phase 7: Extraction-Readiness Audit — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Depends on all of **erp-plan-0-users.md** through **erp-plan-5-purchase-orders.md** being complete.
+- Depends on all of **erp-plan-0-users.md** through **erp-plan-6-purchase-orders.md** being complete.
 - No behavior changes unless a boundary violation is found — if Task 1 finds nothing to fix, Task 2 (documentation) still happens.
 
 ---
@@ -18,7 +18,7 @@
 ### Task 1: Grep audit for cross-module repository access
 
 **Files:**
-- No files created; investigates all of `app/src/{users,tenancy,rbac,idempotency,workflow,purchase-orders}/`.
+- No files created; investigates all of `app/src/{users,tenancy,rbac,master-data,idempotency,workflow,purchase-orders}/`.
 
 **Interfaces:**
 - N/A — this task is read-only investigation, its deliverable is either "no violations found" or a list of fixes made in Task 1b.
@@ -27,14 +27,15 @@
 
 Run from `app/`:
 ```bash
-grep -rn "InjectRepository" src/users src/tenancy src/rbac src/idempotency src/workflow src/purchase-orders
+grep -rn "InjectRepository" src/users src/tenancy src/rbac src/master-data src/idempotency src/workflow src/purchase-orders
 ```
 Expected pattern: each module only injects repositories for entities it owns —
 - `users/` → `User` only
 - `rbac/` → `Role` only (never `User` directly — it goes through `UsersService`)
+- `master-data/` → `Vendor`, `Customer` only
 - `idempotency/` → `IdempotencyKey` only
 - `workflow/` → `WorkflowInstance`, `ApprovalStep` only (never `Role`/`User` directly — goes through `RolesService`/`UsersService`)
-- `purchase-orders/` → `PurchaseOrder` only (never `WorkflowInstance` directly — goes through `WorkflowService`)
+- `purchase-orders/` → `PurchaseOrder` (`replica` connection only — the write side goes through the transaction `EntityManager` `WorkflowService.approve` provides, not a directly-injected `default` repository) and never `Vendor` directly (goes through `VendorsService`), never `WorkflowInstance` directly (goes through `WorkflowService`)
 - `tenancy/` → no repository injection at all (only the subscriber, which touches `DataSource.subscribers`, not a repository)
 
 If everything matches this list, this step found no violations — record that and move to Step 2. If something doesn't match (e.g. `PurchaseOrdersService` importing `Repository<WorkflowInstance>` directly instead of going through `WorkflowService`), note the exact file:line for Task 1b.
@@ -42,13 +43,13 @@ If everything matches this list, this step found no violations — record that a
 - [ ] **Step 2: Grep for cross-module relative imports of services/entities**
 
 ```bash
-grep -rn "from '\.\./\(users\|tenancy\|rbac\|idempotency\|workflow\|purchase-orders\)" src/users src/tenancy src/rbac src/idempotency src/workflow src/purchase-orders
+grep -rn "from '\.\./\(users\|tenancy\|rbac\|master-data\|idempotency\|workflow\|purchase-orders\)" src/users src/tenancy src/rbac src/master-data src/idempotency src/workflow src/purchase-orders
 ```
-Expected: only imports of a module's own exported surface — e.g. `purchase-orders/` may import `WorkflowService` from `../workflow/workflow.service` (that's the intended public interface) but must never import something like `../workflow/workflow-instance.repository` (an internal). Since none of the plans in Phases 0–5 created internal per-module repository wrapper files, check instead that every cross-module import targets a `*.service.ts`, `*.guard.ts`, `*.decorator.ts`, `*.interceptor.ts`, or `*.module.ts` file — never a raw entity or a `*.entity.ts` path reached from inside another feature module's service (entities living in `database/entities/` and being imported by multiple modules is fine and expected — the constraint is about not reaching into another *module's* internals, not about entity file location).
+Expected: only imports of a module's own exported surface — e.g. `purchase-orders/` may import `WorkflowService` from `../workflow/workflow.service` and `VendorsService` from `../master-data/vendors.service` (both intended public interfaces) but must never import something like `../workflow/workflow-instance.repository` (an internal). Since none of the plans in Phases 0–6 created internal per-module repository wrapper files, check instead that every cross-module import targets a `*.service.ts`, `*.guard.ts`, `*.decorator.ts`, `*.interceptor.ts`, or `*.module.ts` file — never a raw entity or a `*.entity.ts` path reached from inside another feature module's service (entities living in `database/entities/` and being imported by multiple modules is fine and expected — the constraint is about not reaching into another *module's* internals, not about entity file location).
 
 - [ ] **Step 3: Record findings**
 
-If Steps 1–2 found violations, list them (file:line, what it does, what it should do instead) as the input to Task 2. If clean, state that explicitly — "no cross-module repository or internal-import violations found across users/tenancy/rbac/idempotency/workflow/purchase-orders" — this is itself a valid, useful audit result, not a failure to find something.
+If Steps 1–2 found violations, list them (file:line, what it does, what it should do instead) as the input to Task 2. If clean, state that explicitly — "no cross-module repository or internal-import violations found across users/tenancy/rbac/master-data/idempotency/workflow/purchase-orders" — this is itself a valid, useful audit result, not a failure to find something.
 
 ---
 
@@ -60,7 +61,7 @@ If Steps 1–2 found violations, list them (file:line, what it does, what it sho
 
 - [ ] **Step 1: For each violation, replace the direct access with the owning module's exported service**
 
-Example shape (only if this exact case is found — do not invent a fix for a violation that doesn't exist): if `PurchaseOrdersService` were found injecting `Repository<WorkflowInstance>` directly instead of calling `WorkflowService.create`/`approve`, the fix is deleting that injection and routing the call through `WorkflowService` (which `PurchaseOrdersModule` already imports via `WorkflowModule`, per **erp-plan-5-purchase-orders.md** Task 5).
+Example shape (only if this exact case is found — do not invent a fix for a violation that doesn't exist): if `PurchaseOrdersService` were found injecting `Repository<WorkflowInstance>` directly instead of calling `WorkflowService.create`/`approve`, the fix is deleting that injection and routing the call through `WorkflowService` (which `PurchaseOrdersModule` already imports via `WorkflowModule`, per **erp-plan-6-purchase-orders.md** Task 5).
 
 - [ ] **Step 2: Run the full test suite after each fix**
 
@@ -90,7 +91,7 @@ git commit -m "refactor(<module>): route <access> through <OwningModule>Service 
 ```markdown
 # ERP Module Boundaries → Future Service Boundaries
 
-Status as of the extraction-readiness audit (Phase 6). This documents which
+Status as of the extraction-readiness audit (Phase 7). This documents which
 in-process module boundaries built in Phases 0–5 are designed to become
 service boundaries later, and what the mechanical swap looks like for each.
 
@@ -115,6 +116,12 @@ calls are plain injected service calls (e.g. `PurchaseOrdersService` calling
   interfaces (confirmed clean in Task 1's audit), so extraction is: stand up
   the service, replace the injected class with an HTTP/gRPC client
   implementing the same method signatures, no caller-side logic changes.
+
+- **`master-data`** — extracts alongside `users`/`rbac` as part of the same
+  identity/reference-data service, or on its own once a second module
+  (invoicing) actually calls `VendorsService`/`CustomersService` — until
+  then it's one more interface `purchase-orders` calls in-process, same
+  shape as the identity-service candidate above.
 
 - **`idempotency`** — could extract to a shared service if multiple future
   services need idempotency keys, but as a single Postgres table behind one

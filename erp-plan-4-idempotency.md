@@ -1,4 +1,4 @@
-# ERP Phase 3: Idempotency Keys — Implementation Plan
+# ERP Phase 4: Idempotency Keys — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -14,7 +14,7 @@ A row can be left in `status: 'pending'` forever if the process crashes between 
 
 - `synchronize` stays off — migrations only, from `app/`.
 - Depends on **erp-plan-1-tenancy.md** (`TenantContext.getTenantId()`) — every idempotency row is tenant-scoped, so a key collision across tenants is impossible by construction.
-- This module is generic: it doesn't know what "purchase order" or any other business concept is. It's proven with a throwaway test controller in this plan, then actually applied to `POST /purchase-orders` in **erp-plan-5-purchase-orders.md**.
+- This module is generic: it doesn't know what "purchase order" or any other business concept is. It's proven with a throwaway test controller in this plan, then actually applied to `POST /purchase-orders` in **erp-plan-6-purchase-orders.md**.
 
 ---
 
@@ -418,7 +418,7 @@ git commit -m "feat(idempotency): add Idempotent decorator and IdempotencyInterc
 - Modify: `app/src/app.module.ts`
 
 **Interfaces:**
-- Produces: `IdempotencyModule`, exporting `IdempotencyInterceptor` for any controller (Phase 5's `PurchaseOrdersController`, and this phase's own proof controller) to apply via `@UseInterceptors()`.
+- Produces: `IdempotencyModule`, exporting `IdempotencyInterceptor` for any controller (Phase 6's `PurchaseOrdersController`, and this phase's own proof controller) to apply via `@UseInterceptors()`.
 
 - [ ] **Step 1: Write the module**
 
@@ -472,8 +472,8 @@ git commit -m "feat(idempotency): wire IdempotencyModule into AppModule"
 ### Task 4: Prove it end-to-end with a throwaway test controller
 
 **Files:**
-- Create: `app/src/idempotency/idempotency-demo.controller.ts` (temporary — deleted in this same task's last step once the integration test passes; exists only to prove the interceptor works over real HTTP before Phase 5 wires it to something real)
-- Test: `app/test/idempotency.e2e-spec.ts` (uses the demo controller while it exists — this test is also deleted at the end of this task, since it verifies the interceptor generically and Phase 5 adds an equivalent test against `PurchaseOrdersController`)
+- Create: `app/src/idempotency/idempotency-demo.controller.ts` (temporary — deleted in this same task's last step once the integration test passes; exists only to prove the interceptor works over real HTTP before Phase 6 wires it to something real)
+- Test: `app/test/idempotency.e2e-spec.ts` (uses the demo controller while it exists — this test is also deleted at the end of this task, since it verifies the interceptor generically and Phase 6 adds an equivalent test against `PurchaseOrdersController`)
 
 **Interfaces:**
 - Consumes: `IdempotencyInterceptor` + `Idempotent()` from Task 2/3.
@@ -578,7 +578,7 @@ If no `test/jest-e2e.json` exists yet in this repo, add one following Nest's sta
 ```bash
 git rm app/src/idempotency/idempotency-demo.controller.ts app/test/idempotency.e2e-spec.ts
 ```
-Remove `IdempotencyDemoController` from `IdempotencyModule`'s `controllers` array. This was scaffolding to prove the interceptor works over real HTTP before Phase 5 attaches it to `PurchaseOrdersController` for real — Phase 5 writes its own e2e test against the real endpoint, so this one would just be dead weight afterward.
+Remove `IdempotencyDemoController` from `IdempotencyModule`'s `controllers` array. This was scaffolding to prove the interceptor works over real HTTP before Phase 6 attaches it to `PurchaseOrdersController` for real — Phase 6 writes its own e2e test against the real endpoint, so this one would just be dead weight afterward.
 
 - [ ] **Step 5: Confirm the app still builds after removal, then commit**
 
@@ -594,5 +594,5 @@ git commit -m "test(idempotency): prove IdempotencyInterceptor against real Post
 
 - `idempotency_keys` table exists, unique on `(tenantId, key)`.
 - `IdempotencyInterceptor` unit-tested for: pass-through when undecorated, missing-header rejection, new-key success + caching, replay on match, conflict on hash mismatch, conflict on a recent pending key, reclaim + successful run on a pending key older than `PENDING_TIMEOUT_MS`.
-- Proven once against a real Postgres connection via a throwaway controller/e2e test, then that scaffolding removed — the module is ready to attach to a real endpoint in Phase 5 with no unit-test-only blind spots.
+- Proven once against a real Postgres connection via a throwaway controller/e2e test, then that scaffolding removed — the module is ready to attach to a real endpoint in Phase 6 with no unit-test-only blind spots.
 - `npm run build` and `npm test` both pass in `app/`.

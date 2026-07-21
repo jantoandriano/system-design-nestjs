@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a `Tenant` entity, scope `User` (and, from Phase 5 on, `PurchaseOrder`) by `tenantId`, and enforce that scoping at both the request boundary (JWT claim → request-scoped context) and the ORM boundary (a subscriber that throws on a cross-tenant load).
+**Goal:** Add a `Tenant` entity, scope `User` (and, from Phase 6 on, `PurchaseOrder`) by `tenantId`, and enforce that scoping at both the request boundary (JWT claim → request-scoped context) and the ORM boundary (a subscriber that throws on a cross-tenant load).
 
 **Architecture:** `tenantId` flows in on the JWT payload, gets bound into an `AsyncLocalStorage`-backed `TenantContext` by a global interceptor, and every tenant-scoped repository call is expected to filter by it explicitly. A TypeORM subscriber is the safety net: it doesn't filter queries (subscribers can't), it asserts on load that nothing outside the current tenant context slipped through. `Task` is deliberately **not** touched — `GET /tasks` is intentionally unauthenticated (see `CLAUDE.md`), so there's no tenant context to scope it by, and adding `tenant_id` there would just create a silent leak on an unauthenticated route.
 

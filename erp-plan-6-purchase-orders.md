@@ -1,18 +1,18 @@
-# ERP Phase 5: Purchase Orders — Implementation Plan
+# ERP Phase 6: Purchase Orders — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The real ERP business module that proves the four platform capabilities work together: create a purchase order (idempotent, RBAC-gated, tenant-scoped) → it sits `pending` as a `WorkflowInstance` → an approver (RBAC-gated) approves or rejects it → on approval, the actual `PurchaseOrder` row gets written.
+**Goal:** The real ERP business module that proves the platform capabilities work together: create a purchase order (idempotent, RBAC-gated, tenant-scoped, against a real `Vendor`) → it sits `pending` as a `WorkflowInstance` → a *different* approver (RBAC-gated, self-approval blocked) approves or rejects it → on approval, the actual `PurchaseOrder` row gets written.
 
-**Architecture:** `PurchaseOrdersModule` owns the `PurchaseOrder` entity and registers a `purchase-order.create` handler with `WorkflowService` (Phase 4) at startup. `PurchaseOrdersController.create` never writes a `PurchaseOrder` row directly — it calls `WorkflowService.create`, which returns a pending instance; the actual insert happens inside the handler, invoked by `WorkflowService.approve` (Phase 4) when `po.approve` clears. Follows `TasksService`'s write-repo/read-repo split (`app/src/tasks/tasks.service.ts`).
+**Architecture:** `PurchaseOrdersModule` owns the `PurchaseOrder` entity and registers a `purchase-order.create` handler with `WorkflowService` (Phase 5) at startup. `PurchaseOrdersController.create` never writes a `PurchaseOrder` row directly — it calls `WorkflowService.create`, which returns a pending instance; the actual insert happens inside the handler, invoked by `WorkflowService.approve` (Phase 5) when `po.approve` clears. Follows `TasksService`'s write-repo/read-repo split (`app/src/tasks/tasks.service.ts`). Before creating the workflow instance, `PurchaseOrdersService` validates `dto.vendorId` via the injected `VendorsService.findById(tenantId, vendorId)` (Phase 3) — a plain `uuid` column, not a TypeORM relation, per the module-boundary discipline (`erp-platform-design.md`): cross-module reference is a service call, never a join.
 
 **Tech Stack:** NestJS, TypeORM, class-validator (DTO validation, already a dependency).
 
 ## Global Constraints
 
 - `synchronize` stays off — migrations only, from `app/`.
-- Depends on all four prior plans: **erp-plan-0-users.md**, **erp-plan-1-tenancy.md**, **erp-plan-2-rbac.md**, **erp-plan-3-idempotency.md**, **erp-plan-4-workflow.md**.
-- Permission strings used here (`po.create`, `po.approve`, `po.read`) must match exactly what Phase 2's seed script assigned to the `admin` role — no new seed changes needed in this phase, they were already forward-declared there.
+- Depends on all prior plans: **erp-plan-0-users.md**, **erp-plan-1-tenancy.md**, **erp-plan-2-rbac.md**, **erp-plan-3-master-data.md** (`VendorsService.findById`), **erp-plan-4-idempotency.md**, **erp-plan-5-workflow.md**.
+- Permission strings used here (`po.create`, `po.approve`, `po.read`) must match exactly what Phase 2's seed script assigned to the `admin`/`approver` roles — no new seed changes needed in this phase, they were already forward-declared there.
 
 ---
 
@@ -25,7 +25,7 @@
 - Create: `app/src/database/migrations/<timestamp>-CreatePurchaseOrders.ts`
 
 **Interfaces:**
-- Produces: `PurchaseOrder` — `{ id: string; tenantId: string; vendorName: string; amount: string; currency: string; status: 'approved'; requestedBy: string; approvedBy: string; createdAt: Date; approvedAt: Date }`. (`amount` is `string` because TypeORM returns `decimal` columns as strings to avoid float precision loss — callers must not do arithmetic on it without an explicit parse, same caution as any money column.)
+- Produces: `PurchaseOrder` — `{ id: string; tenantId: string; vendorId: string; amount: string; currency: string; status: 'approved'; requestedBy: string; approvedBy: string; createdAt: Date; approvedAt: Date }`. (`amount` is `string` because TypeORM returns `decimal` columns as strings to avoid float precision loss — callers must not do arithmetic on it without an explicit parse, same caution as any money column. `vendorId` is a plain `uuid` column, not a `@ManyToOne` relation into `Vendor` — see Architecture above.)
 
 - [ ] **Step 1: Write the entity**
 
@@ -47,7 +47,7 @@ export class PurchaseOrder {
   tenantId: string;
 
   @Column()
-  vendorName: string;
+  vendorId: string;
 
   @Column('decimal', { precision: 12, scale: 2 })
   amount: string;
@@ -107,18 +107,17 @@ git commit -m "feat(database): add purchase_orders table"
 - Create: `app/src/purchase-orders/dto/create-purchase-order.dto.ts`
 
 **Interfaces:**
-- Produces: `CreatePurchaseOrderDto` — `{ vendorName: string; amount: string; currency: string }`, validated. `amount` is a **string**, not `number` — money must never round-trip through a JS float. `"19.10"` parsed as a `number` can already carry IEEE-754 rounding error before it ever reaches the `decimal(12,2)` column; validating the string shape directly and passing it straight through (DTO → workflow payload → `PurchaseOrder.amount`, itself a `decimal` column TypeORM also returns as a string) means no arithmetic and no float ever touches the value on this path.
+- Produces: `CreatePurchaseOrderDto` — `{ vendorId: string; amount: string; currency: string }`, validated. `amount` is a **string**, not `number` — money must never round-trip through a JS float. `"19.10"` parsed as a `number` can already carry IEEE-754 rounding error before it ever reaches the `decimal(12,2)` column; validating the string shape directly and passing it straight through (DTO → workflow payload → `PurchaseOrder.amount`, itself a `decimal` column TypeORM also returns as a string) means no arithmetic and no float ever touches the value on this path. `vendorId` is validated as a UUID shape here; whether it actually resolves to a real, same-tenant `Vendor` is checked in `PurchaseOrdersService` (Task 3) via `VendorsService.findById`, not in the DTO — a DTO can't reach the database.
 
 - [ ] **Step 1: Write the DTO**
 
 ```typescript
 // app/src/purchase-orders/dto/create-purchase-order.dto.ts
-import { IsNotEmpty, IsString, Length, Matches } from 'class-validator';
+import { IsString, IsUUID, Length, Matches } from 'class-validator';
 
 export class CreatePurchaseOrderDto {
-  @IsString()
-  @IsNotEmpty()
-  vendorName: string;
+  @IsUUID()
+  vendorId: string;
 
   @IsString()
   @Matches(/^\d+(\.\d{1,2})?$/, {
@@ -158,10 +157,10 @@ git commit -m "feat(purchase-orders): add CreatePurchaseOrderDto"
 - Test: `app/src/purchase-orders/purchase-orders.service.spec.ts`
 
 **Interfaces:**
-- Consumes: `WorkflowService.registerHandler`/`create` (Phase 4 — the handler signature already carries `{ requestedBy, approvedBy }` context and the transaction `EntityManager`, fixed there from the start), `PurchaseOrder` entity from Task 1.
+- Consumes: `WorkflowService.registerHandler`/`create` (Phase 5 — the handler signature already carries `{ requestedBy, approvedBy }` context and the transaction `EntityManager`, fixed there from the start), `VendorsService.findById` (Phase 3), `PurchaseOrder` entity from Task 1.
 - Produces: `PurchaseOrdersService` with:
-  - `onModuleInit()` — registers the `purchase-order.create` handler with `WorkflowService`. The handler writes the `PurchaseOrder` row through the `EntityManager` `WorkflowService.approve` passes it, **not** a directly-injected repository — this is what makes the row insert and the workflow instance's `approved` transition commit as one atomic transaction (see Phase 4's Architecture note). Consequently this service has no `default`-connection repository at all, only `replica` for reads.
-  - `requestCreate(dto: CreatePurchaseOrderDto, tenantId: string, requestedBy: string): Promise<WorkflowInstance>`
+  - `onModuleInit()` — registers the `purchase-order.create` handler with `WorkflowService`. The handler writes the `PurchaseOrder` row through the `EntityManager` `WorkflowService.approve` passes it, **not** a directly-injected repository — this is what makes the row insert and the workflow instance's `approved` transition commit as one atomic transaction (see Phase 5's Architecture note). Consequently this service has no `default`-connection repository at all, only `replica` for reads.
+  - `requestCreate(dto: CreatePurchaseOrderDto, tenantId: string, requestedBy: string): Promise<WorkflowInstance>` — validates `dto.vendorId` via `VendorsService.findById(tenantId, dto.vendorId)` first; throws `BadRequestException` if it doesn't resolve (unknown id, or a real vendor belonging to a different tenant — the tenant-scoped query makes both cases look identical: not found).
   - `findAll(tenantId: string): Promise<PurchaseOrder[]>`
 
 - [ ] **Step 1: Write the failing tests**
@@ -169,17 +168,20 @@ git commit -m "feat(purchase-orders): add CreatePurchaseOrderDto"
 ```typescript
 // app/src/purchase-orders/purchase-orders.service.spec.ts
 import { Test } from '@nestjs/testing';
+import { BadRequestException } from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { PurchaseOrdersService } from './purchase-orders.service';
 import { PurchaseOrder } from '../database/entities/purchase-order.entity';
 import { WorkflowService } from '../workflow/workflow.service';
+import { VendorsService } from '../master-data/vendors.service';
 
 describe('PurchaseOrdersService', () => {
   let service: PurchaseOrdersService;
   const readRepo = { find: jest.fn() };
   const workflowService = { registerHandler: jest.fn(), create: jest.fn() };
+  const vendorsService = { findById: jest.fn() };
   // Stands in for the transactional EntityManager the registered handler
-  // receives from WorkflowService.approve() — see Phase 4.
+  // receives from WorkflowService.approve() — see Phase 5.
   const manager = {
     create: jest.fn((_entity: unknown, d: unknown) => d),
     save: jest.fn(async (_entity: unknown, d: any) => ({ id: 'po-1', ...d })),
@@ -192,6 +194,7 @@ describe('PurchaseOrdersService', () => {
         PurchaseOrdersService,
         { provide: getRepositoryToken(PurchaseOrder, 'replica'), useValue: readRepo },
         { provide: WorkflowService, useValue: workflowService },
+        { provide: VendorsService, useValue: vendorsService },
       ],
     }).compile();
     service = module.get(PurchaseOrdersService);
@@ -206,12 +209,21 @@ describe('PurchaseOrdersService', () => {
     );
   });
 
-  it('requestCreate delegates to WorkflowService.create', async () => {
+  it('requestCreate validates vendorId, then delegates to WorkflowService.create', async () => {
+    vendorsService.findById.mockResolvedValue({ id: 'vendor-1', tenantId: 'tenant-1', name: 'Acme Supplies' });
     workflowService.create.mockResolvedValue({ id: 'wf-1', status: 'pending' });
-    const dto = { vendorName: 'Acme', amount: '100.00', currency: 'USD' };
+    const dto = { vendorId: 'vendor-1', amount: '100.00', currency: 'USD' };
     const result = await service.requestCreate(dto, 'tenant-1', 'user-1');
+    expect(vendorsService.findById).toHaveBeenCalledWith('tenant-1', 'vendor-1');
     expect(workflowService.create).toHaveBeenCalledWith('purchase-order.create', dto, 'tenant-1', 'user-1');
     expect(result.status).toBe('pending');
+  });
+
+  it('requestCreate rejects an unknown or cross-tenant vendorId without touching WorkflowService', async () => {
+    vendorsService.findById.mockResolvedValue(null);
+    const dto = { vendorId: 'vendor-missing', amount: '100.00', currency: 'USD' };
+    await expect(service.requestCreate(dto, 'tenant-1', 'user-1')).rejects.toThrow(BadRequestException);
+    expect(workflowService.create).not.toHaveBeenCalled();
   });
 
   it('findAll reads from the replica repo, scoped by tenant', async () => {
@@ -225,7 +237,7 @@ describe('PurchaseOrdersService', () => {
     service.onModuleInit();
     const [, , handler] = workflowService.registerHandler.mock.calls[0];
     await handler(
-      { vendorName: 'Acme', amount: '100.00', currency: 'USD' },
+      { vendorId: 'vendor-1', amount: '100.00', currency: 'USD' },
       'tenant-1',
       { requestedBy: 'user-1', approvedBy: 'approver-1' },
       manager,
@@ -233,7 +245,7 @@ describe('PurchaseOrdersService', () => {
     expect(manager.save).toHaveBeenCalledWith(
       PurchaseOrder,
       expect.objectContaining({
-        vendorName: 'Acme', amount: '100.00', currency: 'USD', tenantId: 'tenant-1',
+        vendorId: 'vendor-1', amount: '100.00', currency: 'USD', tenantId: 'tenant-1',
         status: 'approved', requestedBy: 'user-1', approvedBy: 'approver-1',
       }),
     );
@@ -252,12 +264,13 @@ Expected: FAIL — module doesn't exist yet.
 
 ```typescript
 // app/src/purchase-orders/purchase-orders.service.ts
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { PurchaseOrder } from '../database/entities/purchase-order.entity';
 import { WorkflowService } from '../workflow/workflow.service';
 import { WorkflowInstance } from '../database/entities/workflow-instance.entity';
+import { VendorsService } from '../master-data/vendors.service';
 import { CreatePurchaseOrderDto } from './dto/create-purchase-order.dto';
 
 @Injectable()
@@ -266,6 +279,7 @@ export class PurchaseOrdersService implements OnModuleInit {
     @InjectRepository(PurchaseOrder, 'replica')
     private readonly readRepo: Repository<PurchaseOrder>,
     private readonly workflowService: WorkflowService,
+    private readonly vendorsService: VendorsService,
   ) {}
 
   onModuleInit(): void {
@@ -276,7 +290,7 @@ export class PurchaseOrdersService implements OnModuleInit {
         const dto = payload as CreatePurchaseOrderDto;
         const purchaseOrder = manager.create(PurchaseOrder, {
           tenantId,
-          vendorName: dto.vendorName,
+          vendorId: dto.vendorId,
           amount: dto.amount,
           currency: dto.currency,
           status: 'approved',
@@ -294,6 +308,10 @@ export class PurchaseOrdersService implements OnModuleInit {
     tenantId: string,
     requestedBy: string,
   ): Promise<WorkflowInstance> {
+    const vendor = await this.vendorsService.findById(tenantId, dto.vendorId);
+    if (!vendor) {
+      throw new BadRequestException(`Unknown vendorId '${dto.vendorId}'`);
+    }
     return this.workflowService.create('purchase-order.create', dto, tenantId, requestedBy);
   }
 
@@ -308,13 +326,13 @@ export class PurchaseOrdersService implements OnModuleInit {
 ```bash
 npx jest purchase-orders/purchase-orders.service.spec.ts
 ```
-Expected: PASS, 4 tests.
+Expected: PASS, 5 tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add app/src/purchase-orders/purchase-orders.service.ts app/src/purchase-orders/purchase-orders.service.spec.ts
-git commit -m "feat(purchase-orders): add PurchaseOrdersService, writing via WorkflowService's transaction manager"
+git commit -m "feat(purchase-orders): add PurchaseOrdersService, validating vendorId via VendorsService"
 ```
 
 ---
@@ -326,7 +344,7 @@ git commit -m "feat(purchase-orders): add PurchaseOrdersService, writing via Wor
 - Test: `app/src/purchase-orders/purchase-orders.controller.spec.ts`
 
 **Interfaces:**
-- Consumes: `PurchaseOrdersService` (Task 3), `JwtAuthGuard` (existing), `RbacGuard`/`RequirePermission` (Phase 2), `IdempotencyInterceptor`/`Idempotent` (Phase 3), `TenantContext.getTenantId()` (Phase 1).
+- Consumes: `PurchaseOrdersService` (Task 3), `JwtAuthGuard` (existing), `RbacGuard`/`RequirePermission` (Phase 2), `IdempotencyInterceptor`/`Idempotent` (Phase 4), `TenantContext.getTenantId()` (Phase 1).
 - Produces: `POST /purchase-orders` (permission `po.create`, idempotent), `GET /purchase-orders` (permission `po.read`).
 
 - [ ] **Step 1: Write the failing tests**
@@ -353,7 +371,7 @@ describe('PurchaseOrdersController', () => {
 
   it('create delegates to requestCreate with tenant and requester from context/req.user', async () => {
     service.requestCreate.mockResolvedValue({ id: 'wf-1', status: 'pending' });
-    const dto = { vendorName: 'Acme', amount: 100, currency: 'USD' };
+    const dto = { vendorId: 'vendor-1', amount: '100.00', currency: 'USD' };
     const result = await TenantContext.run('tenant-1', () =>
       controller.create(dto, { user: { userId: 'user-1' } } as any),
     );
@@ -441,7 +459,7 @@ git commit -m "feat(purchase-orders): add PurchaseOrdersController"
 - Modify: `app/src/app.module.ts`
 
 **Interfaces:**
-- Consumes: `WorkflowModule` (Phase 4), `RbacModule` (Phase 2), `IdempotencyModule` (Phase 3).
+- Consumes: `WorkflowModule` (Phase 5), `RbacModule` (Phase 2), `IdempotencyModule` (Phase 4), `MasterDataModule` (Phase 3, for `VendorsService`).
 
 - [ ] **Step 1: Write the module**
 
@@ -455,6 +473,7 @@ import { PurchaseOrdersService } from './purchase-orders.service';
 import { WorkflowModule } from '../workflow/workflow.module';
 import { RbacModule } from '../rbac/rbac.module';
 import { IdempotencyModule } from '../idempotency/idempotency.module';
+import { MasterDataModule } from '../master-data/master-data.module';
 
 @Module({
   imports: [
@@ -467,6 +486,7 @@ import { IdempotencyModule } from '../idempotency/idempotency.module';
     TypeOrmModule.forFeature([PurchaseOrder], 'replica'),
     WorkflowModule,
     RbacModule,
+    MasterDataModule,
     IdempotencyModule,
   ],
   controllers: [PurchaseOrdersController],
@@ -511,7 +531,7 @@ git commit -m "feat(purchase-orders): wire PurchaseOrdersModule into AppModule"
 
 **Files:**
 - Create: `app/test/purchase-orders.e2e-spec.ts`
-- Create: `app/test/jest-e2e.json` (if it doesn't already exist from Phase 3 — check first; Phase 3's demo e2e test/config was deleted, but the config file itself may have been left in place. If present, reuse it as-is.)
+- Create: `app/test/jest-e2e.json` (if it doesn't already exist from Phase 4 — check first; Phase 4's demo e2e test/config was deleted, but the config file itself may have been left in place. If present, reuse it as-is.)
 
 **Interfaces:**
 - Consumes: the full, real stack — `AppModule` booted against a real Postgres connection.
@@ -530,6 +550,8 @@ describe('Purchase Orders (e2e)', () => {
   let requesterToken: string;
   let approverToken: string;
 
+  let acmeVendorId: string;
+
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication();
@@ -547,6 +569,15 @@ describe('Purchase Orders (e2e)', () => {
       .post('/auth/login')
       .send({ username: process.env.APPROVER_USERNAME, password: process.env.APPROVER_PASSWORD });
     approverToken = approverLogin.body.accessToken;
+
+    // A real Vendor row is a prerequisite now that vendorId is a validated
+    // FK (Phase 3) — the admin/requester role already holds
+    // masterdata.vendor.create from Phase 3's seed task.
+    const vendorRes = await request(app.getHttpServer())
+      .post('/vendors')
+      .set('Authorization', `Bearer ${requesterToken}`)
+      .send({ name: `Acme Supplies ${Date.now()}`, contactEmail: 'ap@acme.test' });
+    acmeVendorId = vendorRes.body.id;
   });
 
   afterAll(async () => {
@@ -558,7 +589,7 @@ describe('Purchase Orders (e2e)', () => {
       .post('/purchase-orders')
       .set('Authorization', `Bearer ${requesterToken}`)
       .set('Idempotency-Key', `e2e-po-${Date.now()}`)
-      .send({ vendorName: 'Acme Supplies', amount: '4200.00', currency: 'USD' });
+      .send({ vendorId: acmeVendorId, amount: '4200.00', currency: 'USD' });
 
     expect(createRes.status).toBe(201);
     expect(createRes.body.status).toBe('pending');
@@ -575,7 +606,17 @@ describe('Purchase Orders (e2e)', () => {
       .set('Authorization', `Bearer ${requesterToken}`);
 
     expect(listRes.status).toBe(200);
-    expect(listRes.body.some((po: { vendorName: string }) => po.vendorName === 'Acme Supplies')).toBe(true);
+    expect(listRes.body.some((po: { vendorId: string }) => po.vendorId === acmeVendorId)).toBe(true);
+  });
+
+  it('rejects a create with an unknown vendorId before touching workflow or idempotency state', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/purchase-orders')
+      .set('Authorization', `Bearer ${requesterToken}`)
+      .set('Idempotency-Key', `e2e-po-badvendor-${Date.now()}`)
+      .send({ vendorId: '00000000-0000-0000-0000-000000000000', amount: '10.00', currency: 'USD' });
+
+    expect(res.status).toBe(400);
   });
 
   it('rejects self-approval — the requester cannot approve their own PO', async () => {
@@ -583,7 +624,7 @@ describe('Purchase Orders (e2e)', () => {
       .post('/purchase-orders')
       .set('Authorization', `Bearer ${requesterToken}`)
       .set('Idempotency-Key', `e2e-po-self-${Date.now()}`)
-      .send({ vendorName: 'Self Approve Vendor', amount: '10.00', currency: 'USD' });
+      .send({ vendorId: acmeVendorId, amount: '10.00', currency: 'USD' });
 
     const approveRes = await request(app.getHttpServer())
       .post(`/workflow/instances/${createRes.body.id}/approve`)
@@ -597,7 +638,7 @@ describe('Purchase Orders (e2e)', () => {
       .post('/purchase-orders')
       .set('Authorization', `Bearer ${requesterToken}`)
       .set('Idempotency-Key', `e2e-po-reject-${Date.now()}`)
-      .send({ vendorName: 'Rejected Vendor', amount: '100.00', currency: 'USD' });
+      .send({ vendorId: acmeVendorId, amount: '100.00', currency: 'USD' });
 
     await request(app.getHttpServer())
       .post(`/workflow/instances/${createRes.body.id}/reject`)
@@ -608,14 +649,17 @@ describe('Purchase Orders (e2e)', () => {
       .get('/purchase-orders')
       .set('Authorization', `Bearer ${requesterToken}`);
 
-    expect(listRes.body.some((po: { vendorName: string }) => po.vendorName === 'Rejected Vendor')).toBe(false);
+    // Rejected instances never reach the create handler, so no row with this
+    // (test-unique) amount should exist — distinguishing by amount since
+    // every PO in this suite now shares the same vendorId.
+    expect(listRes.body.some((po: { amount: string }) => po.amount === '100.00')).toBe(false);
   });
 
   it('rejects a request missing the Idempotency-Key header', async () => {
     const res = await request(app.getHttpServer())
       .post('/purchase-orders')
       .set('Authorization', `Bearer ${requesterToken}`)
-      .send({ vendorName: 'No Key Vendor', amount: '50.00', currency: 'USD' });
+      .send({ vendorId: acmeVendorId, amount: '50.00', currency: 'USD' });
 
     expect(res.status).toBe(400);
   });
@@ -629,7 +673,7 @@ ADMIN_USERNAME=admin ADMIN_PASSWORD=change-me \
 APPROVER_USERNAME=approver APPROVER_PASSWORD=change-me-too \
 npx jest --config ./test/jest-e2e.json purchase-orders.e2e-spec.ts
 ```
-Expected: all 4 tests PASS. This confirms the entire chain — JWT with `tenantId` → `RbacGuard` → `IdempotencyInterceptor` → `WorkflowService` (transactional, row-locked, self-approval blocked) → the `purchase-order.create` handler → the actual `purchase_orders` row — works end-to-end against real Postgres, not mocks.
+Expected: all 5 tests PASS. This confirms the entire chain — JWT with `tenantId` → `RbacGuard` → `IdempotencyInterceptor` → `VendorsService.findById` → `WorkflowService` (transactional, row-locked, self-approval blocked) → the `purchase-order.create` handler → the actual `purchase_orders` row — works end-to-end against real Postgres, not mocks.
 
 - [ ] **Step 3: Commit**
 
@@ -642,9 +686,9 @@ git commit -m "test(purchase-orders): add end-to-end create/approve/reject cover
 
 ## Definition of Done
 
-- `purchase_orders` table exists.
-- `PurchaseOrdersService`/`Controller` unit-tested; the create handler writes via the transaction `EntityManager` `WorkflowService` provides, not a directly-injected repository.
+- `purchase_orders` table exists, `vendorId` a plain `uuid` column (not an ORM relation).
+- `PurchaseOrdersService`/`Controller` unit-tested; the create handler writes via the transaction `EntityManager` `WorkflowService` provides, not a directly-injected repository; `requestCreate` validates `vendorId` via `VendorsService.findById(tenantId, vendorId)` before touching workflow, rejecting unknown/cross-tenant ids with `400`.
 - `amount` is a validated decimal string end-to-end (DTO → workflow payload → `PurchaseOrder.amount`) — no JS `number` round-trip anywhere on the money path.
-- End-to-end test proves: create → pending, a *different* approver approving → real row exists, same-account self-approval → `403`, reject → no row, missing idempotency key → `400`.
-- Every one of the four platform capabilities (tenancy, RBAC, idempotency, workflow) is exercised by a real business write for the first time in this codebase.
+- End-to-end test proves: create with a real vendor → pending, a *different* approver approving → real row exists, unknown `vendorId` → `400`, same-account self-approval → `403`, reject → no row, missing idempotency key → `400`.
+- Every platform capability (tenancy, RBAC, master data, idempotency, workflow) is exercised by a real business write for the first time in this codebase.
 - `npm run build` and `npm test` both pass in `app/`.

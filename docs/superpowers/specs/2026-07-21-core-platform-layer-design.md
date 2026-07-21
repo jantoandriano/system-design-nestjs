@@ -1,7 +1,7 @@
 # Core Platform Layer — Master Data + Inter-Module Comms Design
 
 Date: 2026-07-21
-Status: Approved (design), pending implementation plan
+Status: Implemented as a plan — see `erp-plan-3-master-data.md`. `erp-platform-design.md` and `erp-plan-6-purchase-orders.md` (renamed from `erp-plan-5-purchase-orders.md` to make room for this phase) have been updated to match; `erp-plan-4-idempotency.md`/`erp-plan-5-workflow.md`/`erp-plan-7-extraction-audit.md` renamed and renumbered accordingly.
 
 ## Goal
 
@@ -32,11 +32,13 @@ Customer: id (uuid), tenant_id, name, contactEmail, active, createdAt
 
 Two exported services, `VendorsService` and `CustomersService`, both from `MasterDataModule`. Kept as one module now (YAGNI — no reason to split infra for two near-identical entities yet) but two separate services (not a shared "Party" abstraction) — Vendor management and CRM/Customer are different bounded contexts long-term, and this keeps a future split between them cheap without designing for it prematurely.
 
-CRUD surface follows the existing `TasksService` pattern: write via `default` connection, read via `replica`. Gated by RBAC permissions `masterdata.vendor.create`/`masterdata.vendor.read` and the customer equivalents — requires `rbac` (phase 2) to exist first.
+CRUD surface follows the existing `TasksService` pattern: write via `default` connection, read via `replica`. Gated by RBAC permissions `masterdata.vendor.create`/`masterdata.vendor.read` and the customer equivalents — requires `rbac` (phase 2) to exist first. These permissions get seeded onto the existing `admin`/requester role, same as `po.*` — which requires the seed script's role-upsert to actually apply permission-list changes to an *already-created* role, not just at first creation (a real gap fixed alongside this: see `erp-plan-2-rbac.md`'s `ensureRole`).
+
+Both entities are unique on `(tenantId, name)` — plain CRUD retries or fat-fingered double-submits produce a `409` from the constraint, not a duplicate vendor record. Real ERP pain otherwise: duplicate vendor rows silently break payment/invoice matching downstream. No `@Idempotent()`/`Idempotency-Key` protection on `POST /vendors`/`POST /customers` — that machinery exists for *financial* writes (Phase 4's docstring is explicit about this); master-data create isn't one, and the unique constraint already does the dedupe job idempotency keys would otherwise be repurposed for.
 
 `Customer` has no consumer yet (no invoicing module exists). It's included now anyway because it's cheap, low-risk reference data to seed early and expensive to retrofit as a sibling of `Vendor` later once PO's pattern is copied for invoicing.
 
-**Cross-module reference rule:** `PurchaseOrder.vendorId` is a plain `uuid` column, not a TypeORM `@ManyToOne` relation into `Vendor`. `PurchaseOrdersService` validates it by calling the injected `VendorsService.findById()`, never by joining tables across module lines. This is the concrete enforcement of the existing "no module reaches into another module's repository directly" rule — it also means the reference already looks like what an HTTP/AMQP call to a separated Vendor service would look like, if this is ever extracted.
+**Cross-module reference rule:** `PurchaseOrder.vendorId` is a plain `uuid` column, not a TypeORM `@ManyToOne` relation into `Vendor`. `PurchaseOrdersService` validates it by calling the injected `VendorsService.findById(tenantId, vendorId)` — **tenant-scoped in the call itself**, not a bare `findById(id)` — never by joining tables across module lines. Filtering by `tenantId` at the query is layer 1 of tenant isolation, matching every other tenant-scoped read in this codebase; `TenantScopedSubscriber` (Phase 1) remains layer 2, catching anything that slips through. Relying on the subscriber alone (an unscoped `findById(id)`, tenant check only on `afterLoad`) would still work today but breaks the two-layers-by-default pattern the rest of the platform holds to, so the signature takes `tenantId` explicitly. This is the concrete enforcement of the existing "no module reaches into another module's repository directly" rule — it also means the reference already looks like what an HTTP/AMQP call to a separated Vendor service would look like, if this is ever extracted.
 
 ### 2. Inter-module comms: hybrid, not a single mechanism
 
@@ -66,14 +68,15 @@ Placement rationale: `master-data` needs `rbac` to exist (its CRUD routes are pe
 
 ## Error handling (additions to existing plan)
 
-- PO create with unknown `vendorId` → `400`, validated via `VendorsService.findById()` before idempotency/workflow are touched (same validation-order spot as the existing amount/currency checks).
+- PO create with unknown **or cross-tenant** `vendorId` → `400`, validated via `VendorsService.findById(tenantId, vendorId)` before idempotency/workflow are touched (same validation-order spot as the existing amount/currency checks) — a cross-tenant id is rejected the same way an unknown one is, since the tenant-scoped query finds nothing either way.
 - Master-data CRUD permission failure → `403`, same as any other `RbacGuard`-protected route.
-- Master-data entities are tenant-scoped → same subscriber-level defense-in-depth as `PurchaseOrder` (guard rejects early; subscriber rejects a missing/mismatched tenant context as a second layer).
+- Duplicate vendor/customer name for the same tenant → `409` from the unique constraint, not a raw 500.
+- Master-data entities are tenant-scoped → same subscriber-level defense-in-depth as `PurchaseOrder` (query filters by `tenantId` first; subscriber rejects a missing/mismatched tenant context as the second layer).
 
 ## Testing
 
-- Unit: `VendorsService`/`CustomersService` CRUD + tenant scoping, mirroring the existing `UsersService.spec.ts` pattern (mocked repo, `getRepositoryToken(Vendor, 'default')`).
-- Integration: PO create rejects an unknown `vendorId` with `400`; cross-tenant isolation — tenant A cannot read or reference tenant B's vendors/customers.
+- Unit: `VendorsService`/`CustomersService` CRUD + tenant-scoped `findById` (including the cross-tenant-returns-null case), mirroring the existing `UsersService.spec.ts` pattern (mocked repo, `getRepositoryToken(Vendor, 'default')`).
+- Integration: PO create rejects an unknown or cross-tenant `vendorId` with `400`; duplicate vendor/customer name rejected with `409`; cross-tenant isolation — tenant A cannot read or reference tenant B's vendors/customers.
 
 ## Alternatives considered
 
@@ -85,7 +88,9 @@ Placement rationale: `master-data` needs `rbac` to exist (its CRUD routes are pe
 
 ## Definition of Done
 
-- `master-data` module exists with `Vendor`/`Customer` entities, tenant-scoped, RBAC-gated CRUD, unit-tested.
-- `PurchaseOrder.vendorId` is a validated FK (via service call, not ORM relation) into `master-data`, not a free-text string.
-- Build order in `erp-platform-design.md`'s "Build order" section is updated to insert `master-data` as phase 3, renumbering `idempotency`→4, `workflow`→5, `purchase-orders`→6, audit→7.
+- `master-data` module exists with `Vendor`/`Customer` entities, tenant-scoped, unique on `(tenantId, name)`, RBAC-gated CRUD, unit-tested — done, `erp-plan-3-master-data.md`.
+- `VendorsService.findById(tenantId, id)` is tenant-scoped in the query itself, not relying solely on the subscriber — done, Task 2 of that plan.
+- `PurchaseOrder.vendorId` is a validated FK (via service call, not ORM relation) into `master-data`, not a free-text string — done, `erp-plan-6-purchase-orders.md` (entity, DTO, service, and e2e test all updated).
+- Build order in `erp-platform-design.md`'s "Build order" section updated to insert `master-data` as phase 3, with `idempotency`/`workflow`/`purchase-orders`/audit renumbered 4/5/6/7 and their files renamed to match — done.
+- `admin` role's seed permissions extended with `masterdata.*`, and `ensureRole` fixed to upsert (not create-once) so this actually applies to an already-seeded database — done, `erp-plan-2-rbac.md` + `erp-plan-3-master-data.md` Task 5.
 - No new inter-module communication mechanism introduced beyond direct calls (sync) and the existing RabbitMQ producer/consumer (async).

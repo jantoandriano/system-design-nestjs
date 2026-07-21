@@ -12,7 +12,7 @@
 
 - `synchronize` stays off — migrations only, from `app/`.
 - Depends on **erp-plan-0-users.md** and **erp-plan-1-tenancy.md** being complete (`User.tenantId`, `TenantContext`).
-- Permission strings used in this plan's seed data (`po.create`, `po.approve`, `po.read`) are forward references to the Purchase Orders module (**erp-plan-5-purchase-orders.md**) — RBAC itself has no knowledge of what a permission string means, it just compares strings. This is intentional: RBAC shouldn't need to change when a new business module adds new permission strings.
+- Permission strings used in this plan's seed data (`po.create`, `po.approve`, `po.read`) are forward references to the Purchase Orders module (**erp-plan-6-purchase-orders.md**) — RBAC itself has no knowledge of what a permission string means, it just compares strings. This is intentional: RBAC shouldn't need to change when a new business module adds new permission strings.
 
 ---
 
@@ -423,7 +423,7 @@ git commit -m "feat(rbac): add RequirePermission decorator and RbacGuard"
 
 **Interfaces:**
 - Consumes: `RolesService` (Task 2), `RbacGuard` (Task 3), `UsersModule` (Phase 0).
-- Produces: `RbacModule`, exporting `RolesService` and `RbacGuard` for future modules (Phase 4's `WorkflowModule`, Phase 5's `PurchaseOrdersModule`) to consume.
+- Produces: `RbacModule`, exporting `RolesService` and `RbacGuard` for future modules (Phase 5's `WorkflowModule`, Phase 6's `PurchaseOrdersModule`) to consume.
 
 - [ ] **Step 1: Write the module**
 
@@ -485,7 +485,7 @@ git commit -m "feat(rbac): wire RbacModule into AppModule"
 - Consumes: `Role` entity from Task 1.
 - Produces: seed script now creates two roles (`admin` — `po.create`, `po.read`; `approver` — `po.approve`, `po.read`) and two accounts (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, `APPROVER_USERNAME`/`APPROVER_PASSWORD`).
 
-**Note — why two accounts, not one:** Phase 4 blocks self-approval (`approverId === instance.requestedBy` → `403`). A single account holding both `po.create` and `po.approve` could never approve its own PO under that rule, so the old "one account, fully testable via curl" shortcut no longer works — and shouldn't, since letting one account both request and approve is exactly the control gap self-approval-blocking exists to close. Two accounts is the realistic minimum for a working demo, not extra ceremony.
+**Note — why two accounts, not one:** Phase 5 blocks self-approval (`approverId === instance.requestedBy` → `403`). A single account holding both `po.create` and `po.approve` could never approve its own PO under that rule, so the old "one account, fully testable via curl" shortcut no longer works — and shouldn't, since letting one account both request and approve is exactly the control gap self-approval-blocking exists to close. Two accounts is the realistic minimum for a working demo, not extra ceremony.
 
 - [ ] **Step 1: Update the script**
 
@@ -501,6 +501,10 @@ const SALT_ROUNDS = 10;
 const REQUESTER_PERMISSIONS = ['po.create', 'po.read'];
 const APPROVER_PERMISSIONS = ['po.approve', 'po.read'];
 
+// Upsert, not create-once: a later phase (e.g. master-data) extends this
+// same seed script's permission constants for an already-existing role, and
+// a re-run must actually apply that — a create-if-missing-only version would
+// silently leave an already-seeded role's permissions stale forever.
 async function ensureRole(
   roleRepo: ReturnType<typeof dataSource.getRepository<Role>>,
   tenantId: string,
@@ -511,6 +515,9 @@ async function ensureRole(
   if (!role) {
     role = await roleRepo.save(roleRepo.create({ tenantId, name, permissions }));
     console.log(`Created role '${name}'.`);
+  } else if (JSON.stringify([...role.permissions].sort()) !== JSON.stringify([...permissions].sort())) {
+    role = await roleRepo.save({ ...role, permissions });
+    console.log(`Updated permissions for role '${name}'.`);
   }
   return role;
 }
@@ -601,5 +608,5 @@ git commit -m "feat(database): seed separate requester and approver demo account
 - `roles` table exists, tenant-scoped; `users.roleId` links a user to at most one role.
 - `RolesService` and `RbacGuard` covered by unit tests, including the tenant-mismatch case.
 - `@RequirePermission()` is available for any future controller route to declare its required permission.
-- Seed script creates two working demo accounts — `admin` (requester: `po.create`, `po.read`) and `approver` (`po.approve`, `po.read`) — so Phase 5's walkthrough can exercise a real create → approve flow without one account approving its own request.
+- Seed script creates two working demo accounts — `admin` (requester: `po.create`, `po.read`) and `approver` (`po.approve`, `po.read`) — so Phase 6's walkthrough can exercise a real create → approve flow without one account approving its own request.
 - `npm run build` and `npm test` both pass in `app/`.

@@ -1,12 +1,12 @@
-# ERP Phase 4: Workflow / Approval Chains — Implementation Plan
+# ERP Phase 5: Workflow / Approval Chains — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A generic pending → approved/rejected state machine. A business module (Phase 5's `purchase-orders`) creates a `WorkflowInstance` instead of writing directly; on approval, `WorkflowService` invokes whatever handler that business module registered for the instance's `type`.
+**Goal:** A generic pending → approved/rejected state machine. A business module (Phase 6's `purchase-orders`) creates a `WorkflowInstance` instead of writing directly; on approval, `WorkflowService` invokes whatever handler that business module registered for the instance's `type`.
 
-**Architecture:** Two tables — `WorkflowInstance` (the state) and `ApprovalStep` (the audit trail of who approved/rejected and when). No `WorkflowDefinition` table: definitions are an in-process handler registry (`WorkflowService.registerHandler(type, handler)`), since there's no admin UI to edit workflow definitions dynamically and a DB table for that would just be config nobody reads. `WorkflowController`'s approve/reject routes only require authentication (`JwtAuthGuard`) — the permission check is *dynamic* (which permission is required depends on the instance's `type`, looked up at runtime), so it happens inside `WorkflowService`, not via a static `@RequirePermission()` on the route the way Phase 5's create endpoint works.
+**Architecture:** Two tables — `WorkflowInstance` (the state) and `ApprovalStep` (the audit trail of who approved/rejected and when). No `WorkflowDefinition` table: definitions are an in-process handler registry (`WorkflowService.registerHandler(type, handler)`), since there's no admin UI to edit workflow definitions dynamically and a DB table for that would just be config nobody reads. `WorkflowController`'s approve/reject routes only require authentication (`JwtAuthGuard`) — the permission check is *dynamic* (which permission is required depends on the instance's `type`, looked up at runtime), so it happens inside `WorkflowService`, not via a static `@RequirePermission()` on the route the way Phase 6's create endpoint works.
 
-`approve()`/`reject()` run inside a DB transaction with a `pessimistic_write` row lock on the `WorkflowInstance` row — a plain read-then-write (select, check `status === 'pending'`, save) would let two concurrent approve calls on the same instance both pass the pending check and both fire the handler, producing a duplicate financial write. The lock serializes them: the second call blocks until the first's transaction commits, then sees `status !== 'pending'` and gets a `409`. The registered handler receives the transaction's `EntityManager` as its last argument, so the business-module write (Phase 5's `PurchaseOrder` insert) and the instance's `approved` transition commit atomically — either both happen or neither does. `approve()` also rejects with `403` if `approverId === instance.requestedBy` (no self-approval — this is a real internal control, not a nicety, and it's cheap to enforce here before any other module copies the pattern without it).
+`approve()`/`reject()` run inside a DB transaction with a `pessimistic_write` row lock on the `WorkflowInstance` row — a plain read-then-write (select, check `status === 'pending'`, save) would let two concurrent approve calls on the same instance both pass the pending check and both fire the handler, producing a duplicate financial write. The lock serializes them: the second call blocks until the first's transaction commits, then sees `status !== 'pending'` and gets a `409`. The registered handler receives the transaction's `EntityManager` as its last argument, so the business-module write (Phase 6's `PurchaseOrder` insert) and the instance's `approved` transition commit atomically — either both happen or neither does. `approve()` also rejects with `403` if `approverId === instance.requestedBy` (no self-approval — this is a real internal control, not a nicety, and it's cheap to enforce here before any other module copies the pattern without it).
 
 **Tech Stack:** NestJS, TypeORM.
 
@@ -14,7 +14,7 @@
 
 - `synchronize` stays off — migrations only, from `app/`.
 - Depends on **erp-plan-1-tenancy.md** (`TenantContext`) and **erp-plan-2-rbac.md** (`RolesService`, `UsersService.findById`).
-- This module has zero knowledge of purchase orders, invoices, or any other business concept — it only knows `type: string`, `payload: unknown`, and a permission-string lookup table keyed by `type`. Phase 5 is what makes it mean anything.
+- This module has zero knowledge of purchase orders, invoices, or any other business concept — it only knows `type: string`, `payload: unknown`, and a permission-string lookup table keyed by `type`. Phase 6 is what makes it mean anything.
 
 ---
 
@@ -143,7 +143,7 @@ git commit -m "feat(database): add workflow_instances and approval_steps tables"
   - `reject(instanceId: string, approverId: string): Promise<WorkflowInstance>` — same locking, no self-reject restriction (declining your own request isn't a control violation)
   - `findById(id: string): Promise<WorkflowInstance | null>`
 
-This is the exact interface Phase 5's `PurchaseOrdersService` calls `registerHandler`/`create` against, and `WorkflowController` (Task 3) calls `approve`/`reject` against. The handler's 4-argument signature (payload, tenantId, requester/approver context, transaction manager) is fixed from the start here, so Phase 5 doesn't need to widen it later.
+This is the exact interface Phase 6's `PurchaseOrdersService` calls `registerHandler`/`create` against, and `WorkflowController` (Task 3) calls `approve`/`reject` against. The handler's 4-argument signature (payload, tenantId, requester/approver context, transaction manager) is fixed from the start here, so Phase 6 doesn't need to widen it later.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -377,7 +377,7 @@ export class WorkflowService {
       await this.assertPermission(approverId, instance.tenantId, registration.requiredApprovePermission);
 
       // Handler runs inside this transaction, on this manager — its write
-      // (e.g. Phase 5's PurchaseOrder insert) and the instance's approved
+      // (e.g. Phase 6's PurchaseOrder insert) and the instance's approved
       // transition below either both commit or both roll back.
       await registration.handler(
         instance.payload,
@@ -604,7 +604,7 @@ git commit -m "feat(workflow): add WorkflowController approve/reject/get endpoin
 
 **Interfaces:**
 - Consumes: `RbacModule` (Phase 2), `UsersModule` (Phase 0).
-- Produces: `WorkflowModule`, exporting `WorkflowService` for Phase 5's `PurchaseOrdersModule` to call `registerHandler`/`create` on.
+- Produces: `WorkflowModule`, exporting `WorkflowService` for Phase 6's `PurchaseOrdersModule` to call `registerHandler`/`create` on.
 
 - [ ] **Step 1: Write the module**
 
