@@ -8,6 +8,7 @@ import { AppService } from './app.service';
 import { DatabaseModule } from './database/database.module';
 import { TasksModule } from './tasks/tasks.module';
 import { QueueModule } from './queue/queue.module';
+import { UsersModule } from './users/users.module';
 import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
 import { MetricsModule } from './metrics/metrics.module';
@@ -33,6 +34,7 @@ import { MetricsModule } from './metrics/metrics.module';
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     DatabaseModule,
     QueueModule,
+    UsersModule,
     TasksModule,
     HealthModule,
     AuthModule,
