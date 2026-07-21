@@ -3,8 +3,9 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Task } from './entities/task.entity';
 import { ProcessedEvent } from './entities/processed-event.entity';
+import { User } from './entities/user.entity';
 
-const ENTITIES = [Task, ProcessedEvent];
+const ENTITIES = [Task, ProcessedEvent, User];
 
 @Module({
   imports: [

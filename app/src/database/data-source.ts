@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import { config } from 'dotenv';
 import { Task } from './entities/task.entity';
 import { ProcessedEvent } from './entities/processed-event.entity';
+import { User } from './entities/user.entity';
 
 config();
 
@@ -22,7 +23,7 @@ export default new DataSource({
   username: process.env.POSTGRES_USER,
   password: process.env.POSTGRES_PASSWORD,
   database: process.env.POSTGRES_DB,
-  entities: [Task, ProcessedEvent],
+  entities: [Task, ProcessedEvent, User],
   migrations: [__dirname + '/migrations/*{.ts,.js}'],
   synchronize: false,
 });
