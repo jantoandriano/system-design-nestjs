@@ -36,7 +36,12 @@ describe('AuthService', () => {
 
   it('rejects an unknown username', async () => {
     usersService.findByUsername.mockResolvedValue(null);
+    usersService.validatePassword.mockResolvedValue(false);
     await expect(service.login('nobody', 'whatever')).rejects.toThrow(UnauthorizedException);
+    // Timing-attack guard: validatePassword must still run (with null)
+    // instead of short-circuiting, so an unknown username doesn't return
+    // faster than a wrong-password case for a real user.
+    expect(usersService.validatePassword).toHaveBeenCalledWith(null, 'whatever');
   });
 
   it('rejects an incorrect password', async () => {

@@ -53,4 +53,9 @@ describe('UsersService', () => {
     const ok = await service.validatePassword(created, 'wrong-password');
     expect(ok).toBe(false);
   });
+
+  it('resolves false without throwing when the user is null', async () => {
+    const ok = await service.validatePassword(null, 'anything');
+    expect(ok).toBe(false);
+  });
 });

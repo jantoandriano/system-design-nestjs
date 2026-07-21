@@ -6,6 +6,14 @@ import { User } from '../database/entities/user.entity';
 
 const SALT_ROUNDS = 10;
 
+// Fixed, precomputed bcrypt hash with no corresponding real account. Used
+// solely to burn a real bcrypt.compare cost when the username doesn't
+// exist, so an unknown-username login takes the same time as a
+// wrong-password login for a real user — otherwise the missing compare
+// call lets response timing leak which case occurred. The plaintext this
+// hashes is irrelevant; it will never be typed as a password.
+const DUMMY_HASH = '$2b$10$BCW6AdDYjzrLtC.a9xiTy.tq0M99F5cm8KK.BWzKFR5OBm780hQNO';
+
 @Injectable()
 export class UsersService {
   constructor(
@@ -23,7 +31,13 @@ export class UsersService {
     return this.repo.findOne({ where: { username } });
   }
 
-  async validatePassword(user: User, password: string): Promise<boolean> {
+  async validatePassword(user: User | null, password: string): Promise<boolean> {
+    if (user == null) {
+      // Still pay the bcrypt cost so this doesn't return faster than the
+      // real-user path (see DUMMY_HASH comment above).
+      await bcrypt.compare(password, DUMMY_HASH);
+      return false;
+    }
     return bcrypt.compare(password, user.passwordHash);
   }
 }
