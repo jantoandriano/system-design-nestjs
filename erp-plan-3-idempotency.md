@@ -6,6 +6,8 @@
 
 **Architecture:** One Postgres table, `idempotency_keys`, unique on `(tenantId, key)`. The interceptor hashes the request body (SHA-256), checks/creates a row before calling the handler, and updates it after. Concurrency is handled by letting the unique constraint do the work: a duplicate insert throws, which the interceptor turns into `409`.
 
+A row can be left in `status: 'pending'` forever if the process crashes between inserting it and either completing or erroring the request (the happy-path completion and the error-path delete both require the process to still be alive to run them). Without a bound on how long `pending` is trusted, that key is dead for every future retry, indefinitely. `IdempotencyInterceptor` bounds this with a `PENDING_TIMEOUT_MS` (30s): a `pending` row older than that is treated as abandoned — the interceptor deletes it and proceeds as though the key were new, rather than 409ing forever. 30s is deliberately generous relative to any real request in this stack; it only ever matters after an actual crash, not under normal latency.
+
 **Tech Stack:** NestJS interceptors, TypeORM, Node's built-in `crypto` (no new dependency for hashing).
 
 ## Global Constraints
@@ -111,7 +113,8 @@ git commit -m "feat(database): add idempotency_keys table"
   - Decorated, missing `Idempotency-Key` header → `400`.
   - New `(tenantId, key)` → insert `pending` row, call handler, on success update to `completed` with the response cached, on handler error delete the row (so a retry with the same key can proceed cleanly).
   - Existing row, same `requestHash`, `status = completed` → return the cached `responseBody`/`statusCode`, handler never runs.
-  - Existing row, same `requestHash`, `status = pending` → `409` (another request with this exact key is still in flight).
+  - Existing row, same `requestHash`, `status = pending`, younger than `PENDING_TIMEOUT_MS` (30s) → `409` (another request with this exact key is still in flight).
+  - Existing row, `status = pending`, **older than `PENDING_TIMEOUT_MS`** → treated as abandoned (the process that owned it crashed before completing or erroring it): delete the row, proceed as if the key were new.
   - Existing row, different `requestHash` → `409`.
   - Concurrent insert race (two requests, same new key, both miss the lookup) → the loser's unique-constraint violation on insert is caught and turned into `409`.
 
@@ -234,10 +237,11 @@ describe('IdempotencyInterceptor', () => {
     });
   });
 
-  it('rejects a key that is still pending (concurrent in-flight request)', (done) => {
+  it('rejects a key that is still pending and recent (concurrent in-flight request)', (done) => {
     repo.findOne.mockResolvedValue({
       status: 'pending',
       requestHash: require('crypto').createHash('sha256').update(JSON.stringify({ a: 1 })).digest('hex'),
+      createdAt: new Date(), // just created — well inside PENDING_TIMEOUT_MS
     });
     const interceptor = makeInterceptor(true);
     const handler: CallHandler = { handle: jest.fn() };
@@ -248,6 +252,25 @@ describe('IdempotencyInterceptor', () => {
           done();
         },
       });
+    });
+  });
+
+  it('reclaims a pending key older than PENDING_TIMEOUT_MS as abandoned and runs the handler', (done) => {
+    repo.findOne.mockResolvedValue({
+      status: 'pending',
+      requestHash: require('crypto').createHash('sha256').update(JSON.stringify({ a: 1 })).digest('hex'),
+      createdAt: new Date(Date.now() - 60_000), // 60s old — a crashed request, not a slow one
+    });
+    const interceptor = makeInterceptor(true);
+    const handler: CallHandler = { handle: () => of({ id: 'po-1' }) };
+    TenantContext.run('tenant-1', () => {
+      interceptor
+        .intercept(makeContext({ 'idempotency-key': 'key-1' }, { a: 1 }), handler)
+        .subscribe((result) => {
+          expect(repo.delete).toHaveBeenCalledWith({ tenantId: 'tenant-1', key: 'key-1' });
+          expect(result).toEqual({ id: 'po-1' });
+          done();
+        });
     });
   });
 });
@@ -281,6 +304,8 @@ import { Repository } from 'typeorm';
 import { IDEMPOTENT_KEY } from './idempotent.decorator';
 import { IdempotencyKey } from '../database/entities/idempotency-key.entity';
 import { TenantContext } from '../tenancy/tenant-context';
+
+const PENDING_TIMEOUT_MS = 30_000;
 
 function hashBody(body: unknown): string {
   return createHash('sha256').update(JSON.stringify(body ?? {})).digest('hex');
@@ -319,34 +344,52 @@ export class IdempotencyInterceptor implements NestInterceptor {
           if (existing.requestHash !== requestHash) {
             throw new ConflictException('Idempotency-Key reused with a different request body');
           }
-          if (existing.status === 'pending') {
+          if (existing.status === 'completed') {
+            return of(existing.responseBody);
+          }
+          // status === 'pending': still in flight, or abandoned by a crash.
+          const ageMs = Date.now() - existing.createdAt.getTime();
+          if (ageMs < PENDING_TIMEOUT_MS) {
             throw new ConflictException('A request with this Idempotency-Key is already in flight');
           }
-          return of(existing.responseBody);
+          // Older than the timeout — no live request is going to complete or
+          // error this row, so reclaim it and proceed as a fresh key.
+          return from(this.repo.delete({ tenantId, key })).pipe(
+            switchMap(() => this.runAndCache(tenantId, key, requestHash, next)),
+          );
         }
 
-        return from(
-          this.repo.save(this.repo.create({ tenantId, key, requestHash, status: 'pending' })),
-        ).pipe(
-          catchError(() => {
-            throw new ConflictException('A request with this Idempotency-Key is already in flight');
-          }),
-          switchMap(() =>
-            next.handle().pipe(
-              tap({
-                next: async (response) => {
-                  await this.repo.save(
-                    this.repo.create({ tenantId, key, requestHash, status: 'completed', responseBody: response }),
-                  );
-                },
-                error: async () => {
-                  await this.repo.delete({ tenantId, key });
-                },
-              }),
-            ),
-          ),
-        );
+        return this.runAndCache(tenantId, key, requestHash, next);
       }),
+    );
+  }
+
+  private runAndCache(
+    tenantId: string,
+    key: string,
+    requestHash: string,
+    next: CallHandler,
+  ): Observable<unknown> {
+    return from(
+      this.repo.save(this.repo.create({ tenantId, key, requestHash, status: 'pending' })),
+    ).pipe(
+      catchError(() => {
+        throw new ConflictException('A request with this Idempotency-Key is already in flight');
+      }),
+      switchMap(() =>
+        next.handle().pipe(
+          tap({
+            next: async (response) => {
+              await this.repo.save(
+                this.repo.create({ tenantId, key, requestHash, status: 'completed', responseBody: response }),
+              );
+            },
+            error: async () => {
+              await this.repo.delete({ tenantId, key });
+            },
+          }),
+        ),
+      ),
     );
   }
 }
@@ -357,7 +400,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
 ```bash
 npx jest idempotency/idempotency.interceptor.spec.ts
 ```
-Expected: PASS, 6 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -550,6 +593,6 @@ git commit -m "test(idempotency): prove IdempotencyInterceptor against real Post
 ## Definition of Done
 
 - `idempotency_keys` table exists, unique on `(tenantId, key)`.
-- `IdempotencyInterceptor` unit-tested for: pass-through when undecorated, missing-header rejection, new-key success + caching, replay on match, conflict on hash mismatch, conflict on concurrent pending key.
+- `IdempotencyInterceptor` unit-tested for: pass-through when undecorated, missing-header rejection, new-key success + caching, replay on match, conflict on hash mismatch, conflict on a recent pending key, reclaim + successful run on a pending key older than `PENDING_TIMEOUT_MS`.
 - Proven once against a real Postgres connection via a throwaway controller/e2e test, then that scaffolding removed — the module is ready to attach to a real endpoint in Phase 5 with no unit-test-only blind spots.
 - `npm run build` and `npm test` both pass in `app/`.

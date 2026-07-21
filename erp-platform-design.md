@@ -85,3 +85,13 @@ Dependency-driven — each phase requires the one before it:
 | Idempotency | Postgres table (`idempotency_keys`) | Redis-backed (faster, but a new infra dependency the stack doesn't otherwise need) |
 | Workflow | Table-driven state machine, in-app | XState / Temporal (workflow engine libraries — heavier than a config-driven approval chain needs) |
 | Service boundaries | Module-boundary discipline now, no extraction yet | Extract services now (too large a scope change alongside the four capabilities); ignore extraction concerns entirely (makes a future split expensive) |
+
+## Known limitations (deferred, tracked — not fixed in Phases 0–6)
+
+Identified in a senior-level review of this design before Phase 5 locked in its e2e test. None of these block the current build order; all are cheap to fix now and expensive to retrofit once more business modules copy the patterns below.
+
+- **One role per user** (`erp-plan-2-rbac.md` Task 1) — `User.roleId` is a single nullable column, not a join table. Real org charts get overlapping duties (a clerk who's also a backup approver) faster than a small company expects. Migration path when this bites: nullable `roleId` → a `UserRole` join table, additive, no data loss.
+- **No document numbering** — `PurchaseOrder` (and every future business document) is UUID-only, no human-facing sequential number (`PO-2026-000123`). Fine for an API demo, not for a vendor email or a paper invoice match. Add a tenant-scoped sequence before this is used outside a demo.
+- **Unbounded list endpoints** — `PurchaseOrdersService.findAll` has no pagination, and it's "the reference implementation to follow" per the Architecture section above — meaning every future module's `findAll` will copy the same unbounded pattern unless this is fixed once, here, first.
+- **No generic audit trail** — every entity has `createdAt` only, no `updatedAt`/`updatedBy`, no change log outside `ApprovalStep`'s PO-specific record. "Who changed this vendor's payment terms and when" is a question a small-company ERP still gets asked.
+- **Users/Roles have no deactivate path** — unlike master-data's `Vendor`/`Customer` (`active` flag), `User`/`Role` can only be hard-deleted. Since `PurchaseOrder.requestedBy`/`approvedBy` are raw id strings with no DB foreign key (by design, per module-boundary discipline), a hard-deleted user leaves orphaned references with nothing to resolve them against. Add `active`/deactivate to `User`/`Role` for the same reason master data has it.

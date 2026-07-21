@@ -107,22 +107,24 @@ git commit -m "feat(database): add purchase_orders table"
 - Create: `app/src/purchase-orders/dto/create-purchase-order.dto.ts`
 
 **Interfaces:**
-- Produces: `CreatePurchaseOrderDto` — `{ vendorName: string; amount: number; currency: string }`, validated.
+- Produces: `CreatePurchaseOrderDto` — `{ vendorName: string; amount: string; currency: string }`, validated. `amount` is a **string**, not `number` — money must never round-trip through a JS float. `"19.10"` parsed as a `number` can already carry IEEE-754 rounding error before it ever reaches the `decimal(12,2)` column; validating the string shape directly and passing it straight through (DTO → workflow payload → `PurchaseOrder.amount`, itself a `decimal` column TypeORM also returns as a string) means no arithmetic and no float ever touches the value on this path.
 
 - [ ] **Step 1: Write the DTO**
 
 ```typescript
 // app/src/purchase-orders/dto/create-purchase-order.dto.ts
-import { IsNotEmpty, IsNumber, IsPositive, IsString, Length } from 'class-validator';
+import { IsNotEmpty, IsString, Length, Matches } from 'class-validator';
 
 export class CreatePurchaseOrderDto {
   @IsString()
   @IsNotEmpty()
   vendorName: string;
 
-  @IsNumber()
-  @IsPositive()
-  amount: number;
+  @IsString()
+  @Matches(/^\d+(\.\d{1,2})?$/, {
+    message: 'amount must be a decimal string with up to 2 decimal places, e.g. "4200.00"',
+  })
+  amount: string;
 
   @IsString()
   @Length(3, 3)
@@ -156,9 +158,9 @@ git commit -m "feat(purchase-orders): add CreatePurchaseOrderDto"
 - Test: `app/src/purchase-orders/purchase-orders.service.spec.ts`
 
 **Interfaces:**
-- Consumes: `WorkflowService.registerHandler`/`create` (Phase 4), `PurchaseOrder` entity from Task 1.
+- Consumes: `WorkflowService.registerHandler`/`create` (Phase 4 — the handler signature already carries `{ requestedBy, approvedBy }` context and the transaction `EntityManager`, fixed there from the start), `PurchaseOrder` entity from Task 1.
 - Produces: `PurchaseOrdersService` with:
-  - `onModuleInit()` — registers the `purchase-order.create` handler with `WorkflowService`
+  - `onModuleInit()` — registers the `purchase-order.create` handler with `WorkflowService`. The handler writes the `PurchaseOrder` row through the `EntityManager` `WorkflowService.approve` passes it, **not** a directly-injected repository — this is what makes the row insert and the workflow instance's `approved` transition commit as one atomic transaction (see Phase 4's Architecture note). Consequently this service has no `default`-connection repository at all, only `replica` for reads.
   - `requestCreate(dto: CreatePurchaseOrderDto, tenantId: string, requestedBy: string): Promise<WorkflowInstance>`
   - `findAll(tenantId: string): Promise<PurchaseOrder[]>`
 
@@ -174,16 +176,20 @@ import { WorkflowService } from '../workflow/workflow.service';
 
 describe('PurchaseOrdersService', () => {
   let service: PurchaseOrdersService;
-  const writeRepo = { create: jest.fn((d) => d), save: jest.fn(async (d) => ({ id: 'po-1', createdAt: new Date(), ...d })) };
   const readRepo = { find: jest.fn() };
   const workflowService = { registerHandler: jest.fn(), create: jest.fn() };
+  // Stands in for the transactional EntityManager the registered handler
+  // receives from WorkflowService.approve() — see Phase 4.
+  const manager = {
+    create: jest.fn((_entity: unknown, d: unknown) => d),
+    save: jest.fn(async (_entity: unknown, d: any) => ({ id: 'po-1', ...d })),
+  };
 
   beforeEach(async () => {
     jest.clearAllMocks();
     const module = await Test.createTestingModule({
       providers: [
         PurchaseOrdersService,
-        { provide: getRepositoryToken(PurchaseOrder, 'default'), useValue: writeRepo },
         { provide: getRepositoryToken(PurchaseOrder, 'replica'), useValue: readRepo },
         { provide: WorkflowService, useValue: workflowService },
       ],
@@ -202,7 +208,7 @@ describe('PurchaseOrdersService', () => {
 
   it('requestCreate delegates to WorkflowService.create', async () => {
     workflowService.create.mockResolvedValue({ id: 'wf-1', status: 'pending' });
-    const dto = { vendorName: 'Acme', amount: 100, currency: 'USD' };
+    const dto = { vendorName: 'Acme', amount: '100.00', currency: 'USD' };
     const result = await service.requestCreate(dto, 'tenant-1', 'user-1');
     expect(workflowService.create).toHaveBeenCalledWith('purchase-order.create', dto, 'tenant-1', 'user-1');
     expect(result.status).toBe('pending');
@@ -215,12 +221,21 @@ describe('PurchaseOrdersService', () => {
     expect(result).toHaveLength(1);
   });
 
-  it('the registered handler writes a PurchaseOrder row via the write repo', async () => {
+  it('the registered handler writes a PurchaseOrder row via the transaction manager it is given', async () => {
     service.onModuleInit();
     const [, , handler] = workflowService.registerHandler.mock.calls[0];
-    await handler({ vendorName: 'Acme', amount: 100, currency: 'USD' }, 'tenant-1');
-    expect(writeRepo.save).toHaveBeenCalledWith(
-      expect.objectContaining({ vendorName: 'Acme', amount: 100, currency: 'USD', tenantId: 'tenant-1', status: 'approved' }),
+    await handler(
+      { vendorName: 'Acme', amount: '100.00', currency: 'USD' },
+      'tenant-1',
+      { requestedBy: 'user-1', approvedBy: 'approver-1' },
+      manager,
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      PurchaseOrder,
+      expect.objectContaining({
+        vendorName: 'Acme', amount: '100.00', currency: 'USD', tenantId: 'tenant-1',
+        status: 'approved', requestedBy: 'user-1', approvedBy: 'approver-1',
+      }),
     );
   });
 });
@@ -248,8 +263,6 @@ import { CreatePurchaseOrderDto } from './dto/create-purchase-order.dto';
 @Injectable()
 export class PurchaseOrdersService implements OnModuleInit {
   constructor(
-    @InjectRepository(PurchaseOrder, 'default')
-    private readonly writeRepo: Repository<PurchaseOrder>,
     @InjectRepository(PurchaseOrder, 'replica')
     private readonly readRepo: Repository<PurchaseOrder>,
     private readonly workflowService: WorkflowService,
@@ -259,17 +272,19 @@ export class PurchaseOrdersService implements OnModuleInit {
     this.workflowService.registerHandler(
       'purchase-order.create',
       'po.approve',
-      async (payload, tenantId) => {
+      async (payload, tenantId, { requestedBy, approvedBy }, manager) => {
         const dto = payload as CreatePurchaseOrderDto;
-        const purchaseOrder = this.writeRepo.create({
+        const purchaseOrder = manager.create(PurchaseOrder, {
           tenantId,
           vendorName: dto.vendorName,
-          amount: String(dto.amount),
+          amount: dto.amount,
           currency: dto.currency,
           status: 'approved',
+          requestedBy,
+          approvedBy,
           approvedAt: new Date(),
         });
-        await this.writeRepo.save(purchaseOrder);
+        await manager.save(PurchaseOrder, purchaseOrder);
       },
     );
   }
@@ -288,87 +303,18 @@ export class PurchaseOrdersService implements OnModuleInit {
 }
 ```
 
-Note: `requestedBy`/`approvedBy` on the `PurchaseOrder` row itself aren't set by this handler as written — the handler only receives `(payload, tenantId)` per `WorkflowService`'s `Handler` type (Phase 4), not the requester or approver id. Fix this in Step 3.5 below by widening the handler signature.
-
-- [ ] **Step 3.5: Widen `WorkflowService`'s handler signature to pass requester/approver ids**
-
-This is a small, backward-compatible change to Phase 4's `WorkflowService` (`app/src/workflow/workflow.service.ts`) — the handler needs to know who requested and who approved so `PurchaseOrder.requestedBy`/`approvedBy` can be set correctly. Change the `Handler` type and the one call site:
-
-```typescript
-// app/src/workflow/workflow.service.ts — type change
-type Handler = (
-  payload: unknown,
-  tenantId: string,
-  context: { requestedBy: string; approvedBy: string },
-) => Promise<void>;
-```
-
-```typescript
-// app/src/workflow/workflow.service.ts — approve(), the handler invocation line changes to:
-await registration.handler(instance.payload, instance.tenantId, {
-  requestedBy: instance.requestedBy,
-  approvedBy: approverId,
-});
-```
-
-Update Phase 4's `WorkflowService.registerHandler` calls in its own test file (`workflow.service.spec.ts`) — the `jest.fn()` handler stub doesn't care about signature, no change needed there. Re-run `npx jest workflow/workflow.service.spec.ts` to confirm still PASS, 7 tests, before continuing.
-
-Now update this task's handler in `purchase-orders.service.ts`:
-
-```typescript
-this.workflowService.registerHandler(
-  'purchase-order.create',
-  'po.approve',
-  async (payload, tenantId, { requestedBy, approvedBy }) => {
-    const dto = payload as CreatePurchaseOrderDto;
-    const purchaseOrder = this.writeRepo.create({
-      tenantId,
-      vendorName: dto.vendorName,
-      amount: String(dto.amount),
-      currency: dto.currency,
-      status: 'approved',
-      requestedBy,
-      approvedBy,
-      approvedAt: new Date(),
-    });
-    await this.writeRepo.save(purchaseOrder);
-  },
-);
-```
-
-And update this task's Step 1 test `'the registered handler writes a PurchaseOrder row via the write repo'` to call the handler with the new third argument:
-
-```typescript
-it('the registered handler writes a PurchaseOrder row via the write repo', async () => {
-  service.onModuleInit();
-  const [, , handler] = workflowService.registerHandler.mock.calls[0];
-  await handler(
-    { vendorName: 'Acme', amount: 100, currency: 'USD' },
-    'tenant-1',
-    { requestedBy: 'user-1', approvedBy: 'approver-1' },
-  );
-  expect(writeRepo.save).toHaveBeenCalledWith(
-    expect.objectContaining({
-      vendorName: 'Acme', amount: '100', currency: 'USD', tenantId: 'tenant-1',
-      status: 'approved', requestedBy: 'user-1', approvedBy: 'approver-1',
-    }),
-  );
-});
-```
-
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
 npx jest purchase-orders/purchase-orders.service.spec.ts
-npx jest workflow/workflow.service.spec.ts
 ```
-Expected: PASS on both — 4 tests and 7 tests respectively.
+Expected: PASS, 4 tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/purchase-orders/purchase-orders.service.ts app/src/purchase-orders/purchase-orders.service.spec.ts app/src/workflow/workflow.service.ts app/src/workflow/workflow.service.spec.ts
-git commit -m "feat(purchase-orders): add PurchaseOrdersService, widen WorkflowService handler signature for requester/approver ids"
+git add app/src/purchase-orders/purchase-orders.service.ts app/src/purchase-orders/purchase-orders.service.spec.ts
+git commit -m "feat(purchase-orders): add PurchaseOrdersService, writing via WorkflowService's transaction manager"
 ```
 
 ---
@@ -512,7 +458,12 @@ import { IdempotencyModule } from '../idempotency/idempotency.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([PurchaseOrder], 'default'),
+    // 'default' isn't registered here: PurchaseOrdersService only reads (via
+    // 'replica'); the actual insert happens through the transaction manager
+    // WorkflowService.approve() passes to the registered handler, which
+    // already has PurchaseOrder registered on the 'default' connection via
+    // database.module.ts's ENTITIES array — a second forFeature here would
+    // be redundant, not required.
     TypeOrmModule.forFeature([PurchaseOrder], 'replica'),
     WorkflowModule,
     RbacModule,
@@ -576,7 +527,8 @@ import { AppModule } from '../src/app.module';
 
 describe('Purchase Orders (e2e)', () => {
   let app: INestApplication;
-  let token: string;
+  let requesterToken: string;
+  let approverToken: string;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -584,56 +536,77 @@ describe('Purchase Orders (e2e)', () => {
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }));
     await app.init();
 
-    const login = await request(app.getHttpServer())
+    // Two accounts, not one: WorkflowService blocks self-approval, so create
+    // and approve must come from different users (see Phase 2 Task 5).
+    const requesterLogin = await request(app.getHttpServer())
       .post('/auth/login')
       .send({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD });
-    token = login.body.accessToken;
+    requesterToken = requesterLogin.body.accessToken;
+
+    const approverLogin = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ username: process.env.APPROVER_USERNAME, password: process.env.APPROVER_PASSWORD });
+    approverToken = approverLogin.body.accessToken;
   });
 
   afterAll(async () => {
     await app.close();
   });
 
-  it('creates a pending instance, then approving it produces a real purchase order', async () => {
+  it('creates a pending instance, then a different approver approving it produces a real purchase order', async () => {
     const createRes = await request(app.getHttpServer())
       .post('/purchase-orders')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Authorization', `Bearer ${requesterToken}`)
       .set('Idempotency-Key', `e2e-po-${Date.now()}`)
-      .send({ vendorName: 'Acme Supplies', amount: 4200, currency: 'USD' });
+      .send({ vendorName: 'Acme Supplies', amount: '4200.00', currency: 'USD' });
 
     expect(createRes.status).toBe(201);
     expect(createRes.body.status).toBe('pending');
 
     const approveRes = await request(app.getHttpServer())
       .post(`/workflow/instances/${createRes.body.id}/approve`)
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${approverToken}`);
 
     expect(approveRes.status).toBe(201);
     expect(approveRes.body.status).toBe('approved');
 
     const listRes = await request(app.getHttpServer())
       .get('/purchase-orders')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${requesterToken}`);
 
     expect(listRes.status).toBe(200);
     expect(listRes.body.some((po: { vendorName: string }) => po.vendorName === 'Acme Supplies')).toBe(true);
   });
 
+  it('rejects self-approval — the requester cannot approve their own PO', async () => {
+    const createRes = await request(app.getHttpServer())
+      .post('/purchase-orders')
+      .set('Authorization', `Bearer ${requesterToken}`)
+      .set('Idempotency-Key', `e2e-po-self-${Date.now()}`)
+      .send({ vendorName: 'Self Approve Vendor', amount: '10.00', currency: 'USD' });
+
+    const approveRes = await request(app.getHttpServer())
+      .post(`/workflow/instances/${createRes.body.id}/approve`)
+      .set('Authorization', `Bearer ${requesterToken}`);
+
+    expect(approveRes.status).toBe(403);
+  });
+
   it('rejecting an instance leaves no purchase order behind', async () => {
     const createRes = await request(app.getHttpServer())
       .post('/purchase-orders')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Authorization', `Bearer ${requesterToken}`)
       .set('Idempotency-Key', `e2e-po-reject-${Date.now()}`)
-      .send({ vendorName: 'Rejected Vendor', amount: 100, currency: 'USD' });
+      .send({ vendorName: 'Rejected Vendor', amount: '100.00', currency: 'USD' });
 
     await request(app.getHttpServer())
       .post(`/workflow/instances/${createRes.body.id}/reject`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Authorization', `Bearer ${approverToken}`)
       .expect(201);
 
     const listRes = await request(app.getHttpServer())
       .get('/purchase-orders')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${requesterToken}`);
 
     expect(listRes.body.some((po: { vendorName: string }) => po.vendorName === 'Rejected Vendor')).toBe(false);
   });
@@ -641,8 +614,8 @@ describe('Purchase Orders (e2e)', () => {
   it('rejects a request missing the Idempotency-Key header', async () => {
     const res = await request(app.getHttpServer())
       .post('/purchase-orders')
-      .set('Authorization', `Bearer ${token}`)
-      .send({ vendorName: 'No Key Vendor', amount: 50, currency: 'USD' });
+      .set('Authorization', `Bearer ${requesterToken}`)
+      .send({ vendorName: 'No Key Vendor', amount: '50.00', currency: 'USD' });
 
     expect(res.status).toBe(400);
   });
@@ -652,9 +625,11 @@ describe('Purchase Orders (e2e)', () => {
 - [ ] **Step 2: Run it against a running dev database**
 
 ```bash
-ADMIN_USERNAME=admin ADMIN_PASSWORD=change-me npx jest --config ./test/jest-e2e.json purchase-orders.e2e-spec.ts
+ADMIN_USERNAME=admin ADMIN_PASSWORD=change-me \
+APPROVER_USERNAME=approver APPROVER_PASSWORD=change-me-too \
+npx jest --config ./test/jest-e2e.json purchase-orders.e2e-spec.ts
 ```
-Expected: all 3 tests PASS. This confirms the entire chain — JWT with `tenantId` → `RbacGuard` → `IdempotencyInterceptor` → `WorkflowService` → the `purchase-order.create` handler → the actual `purchase_orders` row — works end-to-end against real Postgres, not mocks.
+Expected: all 4 tests PASS. This confirms the entire chain — JWT with `tenantId` → `RbacGuard` → `IdempotencyInterceptor` → `WorkflowService` (transactional, row-locked, self-approval blocked) → the `purchase-order.create` handler → the actual `purchase_orders` row — works end-to-end against real Postgres, not mocks.
 
 - [ ] **Step 3: Commit**
 
@@ -668,7 +643,8 @@ git commit -m "test(purchase-orders): add end-to-end create/approve/reject cover
 ## Definition of Done
 
 - `purchase_orders` table exists.
-- `PurchaseOrdersService`/`Controller` unit-tested, including the widened `WorkflowService` handler signature.
-- End-to-end test proves: create → pending, approve → real row exists, reject → no row, missing idempotency key → `400`.
+- `PurchaseOrdersService`/`Controller` unit-tested; the create handler writes via the transaction `EntityManager` `WorkflowService` provides, not a directly-injected repository.
+- `amount` is a validated decimal string end-to-end (DTO → workflow payload → `PurchaseOrder.amount`) — no JS `number` round-trip anywhere on the money path.
+- End-to-end test proves: create → pending, a *different* approver approving → real row exists, same-account self-approval → `403`, reject → no row, missing idempotency key → `400`.
 - Every one of the four platform capabilities (tenancy, RBAC, idempotency, workflow) is exercised by a real business write for the first time in this codebase.
 - `npm run build` and `npm test` both pass in `app/`.

@@ -476,14 +476,16 @@ git commit -m "feat(rbac): wire RbacModule into AppModule"
 
 ---
 
-### Task 5: Seed demo roles
+### Task 5: Seed demo roles — requester + approver, two accounts
 
 **Files:**
 - Modify: `app/src/database/seed-admin.ts`
 
 **Interfaces:**
 - Consumes: `Role` entity from Task 1.
-- Produces: seed script now also creates an `admin` role with every PO permission and assigns it to the seeded admin user — sufficient for the Phase 5 manual walkthrough (a real deployment would separate creator/approver duties across two accounts; this seed optimizes for "one account, fully testable via curl").
+- Produces: seed script now creates two roles (`admin` — `po.create`, `po.read`; `approver` — `po.approve`, `po.read`) and two accounts (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, `APPROVER_USERNAME`/`APPROVER_PASSWORD`).
+
+**Note — why two accounts, not one:** Phase 4 blocks self-approval (`approverId === instance.requestedBy` → `403`). A single account holding both `po.create` and `po.approve` could never approve its own PO under that rule, so the old "one account, fully testable via curl" shortcut no longer works — and shouldn't, since letting one account both request and approve is exactly the control gap self-approval-blocking exists to close. Two accounts is the realistic minimum for a working demo, not extra ceremony.
 
 - [ ] **Step 1: Update the script**
 
@@ -496,15 +498,57 @@ import { Role } from './entities/role.entity';
 import * as bcrypt from 'bcryptjs';
 
 const SALT_ROUNDS = 10;
-const ADMIN_PERMISSIONS = ['po.create', 'po.approve', 'po.read'];
+const REQUESTER_PERMISSIONS = ['po.create', 'po.read'];
+const APPROVER_PERMISSIONS = ['po.approve', 'po.read'];
+
+async function ensureRole(
+  roleRepo: ReturnType<typeof dataSource.getRepository<Role>>,
+  tenantId: string,
+  name: string,
+  permissions: string[],
+): Promise<Role> {
+  let role = await roleRepo.findOne({ where: { tenantId, name } });
+  if (!role) {
+    role = await roleRepo.save(roleRepo.create({ tenantId, name, permissions }));
+    console.log(`Created role '${name}'.`);
+  }
+  return role;
+}
+
+async function ensureUser(
+  userRepo: ReturnType<typeof dataSource.getRepository<User>>,
+  tenantId: string,
+  username: string,
+  password: string,
+  roleId: string,
+): Promise<void> {
+  const existing = await userRepo.findOne({ where: { username } });
+  if (existing) {
+    if (!existing.roleId) {
+      await userRepo.update({ id: existing.id }, { roleId });
+      console.log(`Assigned role to existing user '${username}'.`);
+    } else {
+      console.log(`User '${username}' already exists, skipping.`);
+    }
+    return;
+  }
+  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+  await userRepo.save(userRepo.create({ username, passwordHash, tenantId, roleId }));
+  console.log(`Created user '${username}'.`);
+}
 
 async function seed() {
-  const username = process.env.ADMIN_USERNAME;
-  const password = process.env.ADMIN_PASSWORD;
+  const adminUsername = process.env.ADMIN_USERNAME;
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  const approverUsername = process.env.APPROVER_USERNAME;
+  const approverPassword = process.env.APPROVER_PASSWORD;
   const tenantName = process.env.ADMIN_TENANT_NAME ?? 'default';
 
-  if (!username || !password) {
-    throw new Error('ADMIN_USERNAME and ADMIN_PASSWORD must be set to seed the admin user');
+  if (!adminUsername || !adminPassword) {
+    throw new Error('ADMIN_USERNAME and ADMIN_PASSWORD must be set to seed the requester user');
+  }
+  if (!approverUsername || !approverPassword) {
+    throw new Error('APPROVER_USERNAME and APPROVER_PASSWORD must be set to seed the approver user');
   }
 
   await dataSource.initialize();
@@ -518,36 +562,18 @@ async function seed() {
     console.log(`Created tenant '${tenantName}'.`);
   }
 
-  let role = await roleRepo.findOne({ where: { tenantId: tenant.id, name: 'admin' } });
-  if (!role) {
-    role = await roleRepo.save(
-      roleRepo.create({ tenantId: tenant.id, name: 'admin', permissions: ADMIN_PERMISSIONS }),
-    );
-    console.log(`Created role 'admin' for tenant '${tenantName}'.`);
-  }
+  const adminRole = await ensureRole(roleRepo, tenant.id, 'admin', REQUESTER_PERMISSIONS);
+  const approverRole = await ensureRole(roleRepo, tenant.id, 'approver', APPROVER_PERMISSIONS);
 
-  const existing = await userRepo.findOne({ where: { username } });
-  if (existing) {
-    if (!existing.roleId) {
-      await userRepo.update({ id: existing.id }, { roleId: role.id });
-      console.log(`Assigned role 'admin' to existing user '${username}'.`);
-    } else {
-      console.log(`User '${username}' already exists, skipping.`);
-    }
-  } else {
-    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-    await userRepo.save(
-      userRepo.create({ username, passwordHash, tenantId: tenant.id, roleId: role.id }),
-    );
-    console.log(`Created user '${username}' in tenant '${tenantName}' with role 'admin'.`);
-  }
+  await ensureUser(userRepo, tenant.id, adminUsername, adminPassword, adminRole.id);
+  await ensureUser(userRepo, tenant.id, approverUsername, approverPassword, approverRole.id);
 
   await dataSource.destroy();
   process.exit(0);
 }
 
 seed().catch((err) => {
-  console.error('Seeding admin user failed:', err);
+  console.error('Seeding demo users failed:', err);
   process.exit(1);
 });
 ```
@@ -555,15 +581,17 @@ seed().catch((err) => {
 - [ ] **Step 2: Run it**
 
 ```bash
-ADMIN_USERNAME=admin ADMIN_PASSWORD=change-me npm run seed:admin
+ADMIN_USERNAME=admin ADMIN_PASSWORD=change-me \
+APPROVER_USERNAME=approver APPROVER_PASSWORD=change-me-too \
+npm run seed:admin
 ```
-Expected: on a fresh database, creates tenant + role + user. On a database from Phase 0/1's seed already run, creates the role and assigns it to the existing admin user (the `if (!existing.roleId)` branch).
+Expected: on a fresh database, creates tenant + both roles + both users. On a database from Phase 0/1's seed already run, creates the `approver` role/account alongside the existing admin (idempotent either way).
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add app/src/database/seed-admin.ts
-git commit -m "feat(database): seed script creates an admin role with full PO permissions"
+git commit -m "feat(database): seed separate requester and approver demo accounts"
 ```
 
 ---
@@ -573,5 +601,5 @@ git commit -m "feat(database): seed script creates an admin role with full PO pe
 - `roles` table exists, tenant-scoped; `users.roleId` links a user to at most one role.
 - `RolesService` and `RbacGuard` covered by unit tests, including the tenant-mismatch case.
 - `@RequirePermission()` is available for any future controller route to declare its required permission.
-- Seed script creates a working admin role so Phase 5's manual walkthrough has an account that can create AND approve (single-account testing convenience, documented as a simplification).
+- Seed script creates two working demo accounts — `admin` (requester: `po.create`, `po.read`) and `approver` (`po.approve`, `po.read`) — so Phase 5's walkthrough can exercise a real create → approve flow without one account approving its own request.
 - `npm run build` and `npm test` both pass in `app/`.
