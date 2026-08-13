@@ -43,6 +43,13 @@ describe('UsersService', () => {
     expect(user).toBeNull();
   });
 
+  it('finds a user by id', async () => {
+    repo.findOne.mockResolvedValue({ id: 'user-1', username: 'alice' });
+    const user = await service.findById('user-1');
+    expect(repo.findOne).toHaveBeenCalledWith({ where: { id: 'user-1' } });
+    expect(user?.id).toBe('user-1');
+  });
+
   it('validates a correct password against the stored hash', async () => {
     const created = await service.create('tenant-1', 'bob', 'hunter2');
     const ok = await service.validatePassword(created, 'hunter2');

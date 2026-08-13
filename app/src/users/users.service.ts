@@ -31,6 +31,10 @@ export class UsersService {
     return this.repo.findOne({ where: { username } });
   }
 
+  async findById(id: string): Promise<User | null> {
+    return this.repo.findOne({ where: { id } });
+  }
+
   async validatePassword(user: User | null, password: string): Promise<boolean> {
     if (user == null) {
       // Still pay the bcrypt cost so this doesn't return faster than the
