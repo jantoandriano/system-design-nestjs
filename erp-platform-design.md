@@ -93,6 +93,7 @@ Dependency-driven — each phase requires the one before it:
 | Idempotency | Postgres table (`idempotency_keys`) | Redis-backed (faster, but a new infra dependency the stack doesn't otherwise need) |
 | Workflow | Table-driven state machine, in-app | XState / Temporal (workflow engine libraries — heavier than a config-driven approval chain needs) |
 | Service boundaries | Module-boundary discipline now, no extraction yet | Extract services now (too large a scope change alongside the four capabilities); ignore extraction concerns entirely (makes a future split expensive) |
+| Username scoping | Globally unique `username` across all tenants (DB-level `UNIQUE`, no tenant scoping) | Per-tenant-unique `username` + a tenant selector at login (rejected: `AuthService.login()` looks up a user by username alone before any tenant context exists — there is no tenant selector at login; adding one is a real login-flow redesign, not a schema tweak). Deliberate trade-off, not an oversight — revisit only if a real requirement for duplicate usernames across different tenants emerges, which would require adding a tenant selector to login and changing the unique constraint to `(tenantId, username)` |
 
 ## Known limitations (deferred, tracked — not fixed in Phases 0–6)
 
