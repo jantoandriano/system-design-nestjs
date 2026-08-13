@@ -23,8 +23,9 @@ describe('UsersService', () => {
   });
 
   it('hashes the password before saving', async () => {
-    const user = await service.create('alice', 'correct-horse');
+    const user = await service.create('tenant-1', 'alice', 'correct-horse');
     expect(user.username).toBe('alice');
+    expect(user.tenantId).toBe('tenant-1');
     expect(user.passwordHash).toBeDefined();
     expect(user.passwordHash).not.toBe('correct-horse');
   });
@@ -43,13 +44,13 @@ describe('UsersService', () => {
   });
 
   it('validates a correct password against the stored hash', async () => {
-    const created = await service.create('bob', 'hunter2');
+    const created = await service.create('tenant-1', 'bob', 'hunter2');
     const ok = await service.validatePassword(created, 'hunter2');
     expect(ok).toBe(true);
   });
 
   it('rejects an incorrect password', async () => {
-    const created = await service.create('bob', 'hunter2');
+    const created = await service.create('tenant-1', 'bob', 'hunter2');
     const ok = await service.validatePassword(created, 'wrong-password');
     expect(ok).toBe(false);
   });
