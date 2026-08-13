@@ -13,6 +13,7 @@ import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { TenancyModule } from './tenancy/tenancy.module';
+import { RbacModule } from './rbac/rbac.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { TenancyModule } from './tenancy/tenancy.module';
     QueueModule,
     TenancyModule,
     UsersModule,
+    RbacModule,
     TasksModule,
     HealthModule,
     AuthModule,
