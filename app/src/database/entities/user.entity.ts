@@ -16,10 +16,10 @@ export class User {
   @Column()
   passwordHash: string;
 
-  @Column()
+  @Column('uuid')
   tenantId: string;
 
-  @Column({ nullable: true })
+  @Column({ type: 'uuid', nullable: true })
   roleId: string | null;
 
   @CreateDateColumn()
