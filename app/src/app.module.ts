@@ -12,6 +12,7 @@ import { UsersModule } from './users/users.module';
 import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
 import { MetricsModule } from './metrics/metrics.module';
+import { TenancyModule } from './tenancy/tenancy.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { MetricsModule } from './metrics/metrics.module';
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     DatabaseModule,
     QueueModule,
+    TenancyModule,
     UsersModule,
     TasksModule,
     HealthModule,
