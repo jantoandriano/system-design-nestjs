@@ -4,8 +4,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Task } from './entities/task.entity';
 import { ProcessedEvent } from './entities/processed-event.entity';
 import { User } from './entities/user.entity';
+import { Tenant } from './entities/tenant.entity';
 
-const ENTITIES = [Task, ProcessedEvent, User];
+const ENTITIES = [Task, ProcessedEvent, User, Tenant];
 
 @Module({
   imports: [
