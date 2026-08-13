@@ -4,6 +4,7 @@ import {
   Table,
   TableColumn,
   TableForeignKey,
+  TableUnique,
 } from 'typeorm';
 
 export class CreateRoles1784300000000 implements MigrationInterface {
@@ -51,6 +52,15 @@ export class CreateRoles1784300000000 implements MigrationInterface {
       }),
     );
 
+    // Prevent two roles with the same name in the same tenant.
+    await queryRunner.createUniqueConstraint(
+      'roles',
+      new TableUnique({
+        name: 'UQ_roles_tenantId_name',
+        columnNames: ['tenantId', 'name'],
+      }),
+    );
+
     // Nullable, no backfill needed - a brand-new user has no role until
     // one is assigned. Unlike Phase 1's tenantId, there's no existing
     // data that needs a default value here.
@@ -77,6 +87,7 @@ export class CreateRoles1784300000000 implements MigrationInterface {
   public async down(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.dropForeignKey('users', 'FK_users_roleId');
     await queryRunner.dropColumn('users', 'roleId');
+    await queryRunner.dropUniqueConstraint('roles', 'UQ_roles_tenantId_name');
     await queryRunner.dropForeignKey('roles', 'FK_roles_tenantId');
     await queryRunner.dropTable('roles');
   }
