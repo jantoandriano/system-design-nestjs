@@ -36,6 +36,10 @@ export class RbacGuard implements CanActivate {
     const request = context.switchToHttp().getRequest();
     const requestUser = request.user as RequestUser;
 
+    if (!requestUser?.userId) {
+      throw new ForbiddenException('Not authenticated');
+    }
+
     const user = await this.usersService.findById(requestUser.userId);
     if (!user?.roleId) {
       throw new ForbiddenException('No role assigned');

@@ -27,6 +27,13 @@ describe('RbacGuard', () => {
     await expect(guard.canActivate(context)).resolves.toBe(true);
   });
 
+  it('rejects with ForbiddenException (not a raw TypeError) when a permission is required but req.user is undefined', async () => {
+    const { context, reflector } = makeContext(undefined, 'po.create');
+    const guard = new RbacGuard(reflector as unknown as Reflector, usersService as unknown as UsersService, rolesService as unknown as RolesService);
+    await expect(guard.canActivate(context)).rejects.toThrow(ForbiddenException);
+    expect(usersService.findById).not.toHaveBeenCalled();
+  });
+
   it('denies access when the user has no role', async () => {
     usersService.findById.mockResolvedValue({ id: 'u1', tenantId: 't1', roleId: null });
     const { context, reflector } = makeContext({ userId: 'u1', tenantId: 't1' }, 'po.create');
