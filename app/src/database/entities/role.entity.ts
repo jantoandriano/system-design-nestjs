@@ -5,22 +5,19 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
-@Entity('users')
-export class User {
+@Entity('roles')
+export class Role {
   @PrimaryGeneratedColumn('uuid')
   id: string;
-
-  @Column({ unique: true })
-  username: string;
-
-  @Column()
-  passwordHash: string;
 
   @Column()
   tenantId: string;
 
-  @Column({ nullable: true })
-  roleId: string | null;
+  @Column()
+  name: string;
+
+  @Column('simple-array')
+  permissions: string[];
 
   @CreateDateColumn()
   createdAt: Date;

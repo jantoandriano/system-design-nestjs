@@ -5,8 +5,9 @@ import { Task } from './entities/task.entity';
 import { ProcessedEvent } from './entities/processed-event.entity';
 import { User } from './entities/user.entity';
 import { Tenant } from './entities/tenant.entity';
+import { Role } from './entities/role.entity';
 
-const ENTITIES = [Task, ProcessedEvent, User, Tenant];
+const ENTITIES = [Task, ProcessedEvent, User, Tenant, Role];
 
 @Module({
   imports: [
