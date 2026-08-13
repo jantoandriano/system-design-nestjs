@@ -5,6 +5,15 @@ import * as bcrypt from 'bcryptjs';
 
 const SALT_ROUNDS = 10;
 
+/**
+ * Idempotent bootstrap for the one account needed to log in before any
+ * other users exist. Replaces the old AUTH_USERNAME/AUTH_PASSWORD_HASH
+ * env vars now that credentials live in the users table.
+ *
+ * Since Phase 1 (multi-tenancy), also bootstraps the tenant that account
+ * belongs to: finds-or-creates a Tenant by ADMIN_TENANT_NAME (defaults to
+ * 'default') before creating the user, since User.tenantId is required.
+ */
 async function seed() {
   const username = process.env.ADMIN_USERNAME;
   const password = process.env.ADMIN_PASSWORD;
