@@ -25,13 +25,22 @@ describe('AuthService', () => {
   });
 
   it('issues an access token for valid credentials', async () => {
-    usersService.findByUsername.mockResolvedValue({ id: 'user-1', username: 'alice', passwordHash: 'hash' });
+    usersService.findByUsername.mockResolvedValue({
+      id: 'user-1',
+      username: 'alice',
+      passwordHash: 'hash',
+      tenantId: 'tenant-1',
+    });
     usersService.validatePassword.mockResolvedValue(true);
 
     const result = await service.login('alice', 'correct-horse');
 
     expect(result).toEqual({ accessToken: 'signed.jwt.token' });
-    expect(jwtService.signAsync).toHaveBeenCalledWith({ sub: 'user-1', username: 'alice' });
+    expect(jwtService.signAsync).toHaveBeenCalledWith({
+      sub: 'user-1',
+      username: 'alice',
+      tenantId: 'tenant-1',
+    });
   });
 
   it('rejects an unknown username', async () => {
